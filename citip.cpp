@@ -408,7 +408,7 @@ bool LinearProblem::check(const SparseVector& v)
             {
                 int stat = glp_get_col_stat(lp, j);
                 double coeff = glp_get_col_dual(lp, j);
-                if (stat == GLP_NL && coeff != 0.0)
+                if (stat == GLP_NL && std::abs(coeff) > 1e-9)
                 {
                     print_coeff(std::cout, coeff, false);
                     std::cout << " (";
@@ -421,7 +421,7 @@ bool LinearProblem::check(const SparseVector& v)
             {
                 int stat = glp_get_row_stat(lp, i);
                 double coeff = glp_get_row_dual(lp, i);
-                if ((stat == GLP_NL || stat == GLP_NS) && coeff != 0.0)
+                if ((stat == GLP_NL || stat == GLP_NS) && std::abs(coeff) > 1e-9)
                 {
                     print_coeff(std::cout, coeff, false);
                     std::cout << " (";
