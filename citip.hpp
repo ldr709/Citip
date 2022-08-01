@@ -42,6 +42,9 @@ public:
     void add(const SparseVector&);      // add a constraint C>=0
     bool check(const SparseVector&);    // check if I>=0 is redundant
 
+    virtual void print_variable(std::ostream& out, int v);
+    void print_row(std::ostream& out, int v);
+
 protected:
     glp_prob* lp;
 };
@@ -56,7 +59,11 @@ class ShannonTypeProblem
     : public LinearProblem
 {
 public:
-    explicit ShannonTypeProblem(int num_vars);
+    explicit ShannonTypeProblem(std::vector<std::string> var_names_);
+
+    virtual void print_variable(std::ostream& out, int v);
+
+    const std::vector<std::string> var_names;
 };
 
 // This is used automatically for a ShannonTypeProblem.

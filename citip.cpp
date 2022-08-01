@@ -2,6 +2,7 @@
 #include <utility>      // move
 #include <sstream>      // istringstream
 #include <stdexcept>    // runtime_error
+#include <iostream>
 
 #include <glpk.h>
 
@@ -333,6 +334,37 @@ void LinearProblem::add(const SparseVector& v)
             indices.data()-1, values.data()-1);
 }
 
+void LinearProblem::print_variable(std::ostream& out, int v)
+{
+    out << "v" + v;
+}
+
+static void print_coeff(std::ostream& out, double c, bool first)
+{
+    if (!first)
+        if (c >= 0)
+            out << " + " << c;
+        else
+            out << " - " << -c;
+    else
+        out << c;
+}
+
+void LinearProblem::print_row(std::ostream& out, int i)
+{
+    int num_nonzero_cols = glp_get_mat_row(lp, i, NULL, NULL);
+    std::vector<int> col_idxs(num_nonzero_cols + 1);
+    std::vector<double> coeffs(num_nonzero_cols + 1);
+    glp_get_mat_row(lp, i, col_idxs.data(), coeffs.data());
+
+    for (int j = 1; j <= num_nonzero_cols; ++j)
+    {
+        print_coeff(out, coeffs[j], j == 1);
+        out << ' ';
+        print_variable(out, col_idxs[j]);
+    }
+}
+
 bool LinearProblem::check(const SparseVector& v)
 {
     // check for equalities as I>=0 and -I>=0
@@ -349,8 +381,10 @@ bool LinearProblem::check(const SparseVector& v)
     glp_smcp parm;
     glp_init_smcp(&parm);
     parm.msg_lev = GLP_MSG_ERR;
+    parm.meth = GLP_DUAL;
 
     int num_cols = glp_get_num_cols(lp);
+    int num_rows = glp_get_num_rows(lp);
 
     for (int i = 1; i <= num_cols; ++i)
         glp_set_obj_coef(lp, i, v.get(i));
@@ -366,7 +400,45 @@ bool LinearProblem::check(const SparseVector& v)
         // the original check was for the solution (primal variable values)
         // rather than objective value, but let's do it simpler for now (if
         // an optimum is found, it should be zero anyway):
-        return glp_get_obj_val(lp) >= -v.get(0);
+        if (glp_get_obj_val(lp) >= -v.get(0))
+        {
+            std::cout << "Proof:\n";
+
+            for (int j = 1; j <= num_cols; ++j)
+            {
+                int stat = glp_get_col_stat(lp, j);
+                double coeff = glp_get_col_dual(lp, j);
+                if (stat == GLP_NL && coeff != 0.0)
+                {
+                    print_coeff(std::cout, coeff, false);
+                    std::cout << " (";
+                    print_variable(std::cout, j);
+                    std::cout << " >= " << glp_get_col_lb(lp, j) << ")\n";
+                }
+            }
+
+            for (int i = 1; i <= num_rows; ++i)
+            {
+                int stat = glp_get_row_stat(lp, i);
+                double coeff = glp_get_row_dual(lp, i);
+                if ((stat == GLP_NL || stat == GLP_NS) && coeff != 0.0)
+                {
+                    print_coeff(std::cout, coeff, false);
+                    std::cout << " (";
+                    print_row(std::cout, i);
+                    std::cout
+                        << (stat == GLP_NS ? " == " : " >= ")
+                        << glp_get_row_lb(lp, i) << ")\n";
+                }
+            }
+
+            return true;
+        }
+        else
+        {
+            // TODO: Counterexample.
+            return false;
+        }
     }
 
     if (status == GLP_UNBND) {
@@ -381,12 +453,30 @@ bool LinearProblem::check(const SparseVector& v)
 }
 
 
-ShannonTypeProblem::ShannonTypeProblem(int num_vars)
-    : LinearProblem()
+ShannonTypeProblem::ShannonTypeProblem(std::vector<std::string> var_names_)
+    : LinearProblem(), var_names(std::move(var_names_))
 {
+    int num_vars = var_names.size();
     check_num_vars(num_vars);
     add_columns((1<<num_vars) - 1);
     add_elemental_inequalities(lp, num_vars);
+}
+
+void ShannonTypeProblem::print_variable(std::ostream& out, int v)
+{
+    out << "H(";
+    for (int i = 0; v; ++i)
+    {
+        if (v & 1)
+        {
+            out << var_names[i];
+            if (v >>= 1)
+                out << ',';
+        }
+        else
+            v >>= 1;
+    }
+    out << ')';
 }
 
 
@@ -437,7 +527,7 @@ ParserOutput parse(const std::vector<std::string>& exprs)
 
 bool check(const ParserOutput& out)
 {
-    ShannonTypeProblem prob(out.var_names.size());
+    ShannonTypeProblem prob(out.var_names);
     for (auto&& constraint : out.constraints)
         prob.add(constraint);
     for (auto&& inquiry : out.inquiries) {
