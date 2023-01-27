@@ -15,7 +15,7 @@ using std::move;
 using util::sprint_all;
 
 
-void check_num_vars(int num_vars)
+static void check_num_vars(int num_vars)
 {
     // The index type (int) must allow to represent column numbers up to
     // 2**num_vars. For signed int MAXINT = 2**(8*sizeof(int)-1)-1,
@@ -33,7 +33,7 @@ void check_num_vars(int num_vars)
 
 
 // Shift bits such that the given bit is free.
-int skip_bit(int pool, int bit_index)
+static int skip_bit(int pool, int bit_index)
 {
     int bit = 1 << bit_index;
     int left = (pool & ~(bit-1)) << 1;
@@ -42,7 +42,7 @@ int skip_bit(int pool, int bit_index)
 }
 
 
-void add_elemental_inequalities(glp_prob* lp, int num_vars)
+void ShannonTypeProblem::add_elemental_inequalities(glp_prob* lp, int num_vars)
 {
     // NOTE: GLPK uses 1-based indices and never uses the 0th element.
     int indices[5];
@@ -55,6 +55,8 @@ void add_elemental_inequalities(glp_prob* lp, int num_vars)
         int row = glp_add_rows(lp, 1);
         glp_set_row_bnds(lp, row, GLP_LO, 0.0, NAN);
         glp_set_mat_row(lp, row, 1, indices, values);
+
+        row_to_cmi.emplace_back(CmiTriplet{1,1,1});
         return;
     }
 
@@ -68,6 +70,8 @@ void add_elemental_inequalities(glp_prob* lp, int num_vars)
     // After choosing 2 variables there are 2**(N-2) possible subsets of
     // the remaining N-2 variables.
     int sub_dim = 1 << (num_vars-2);
+
+    row_to_cmi.reserve(num_vars + (num_vars * (num_vars - 1) / 2) * sub_dim + 1);
 
     // index of the entropy component corresponding to the joint entropy of
     // all variables. NOTE: since the left-most column is not used, the
@@ -86,6 +90,8 @@ void add_elemental_inequalities(glp_prob* lp, int num_vars)
         int row = glp_add_rows(lp, 1);
         glp_set_row_bnds(lp, row, GLP_LO, 0.0, NAN);
         glp_set_mat_row(lp, row, 2, indices, values);
+
+        row_to_cmi.emplace_back(CmiTriplet{1 << i, 1 << i, c});
     }
 
     // Add all elemental conditional mutual information positivities, i.e.
@@ -107,6 +113,8 @@ void add_elemental_inequalities(glp_prob* lp, int num_vars)
                 int row = glp_add_rows(lp, 1);
                 glp_set_row_bnds(lp, row, GLP_LO, 0.0, NAN);
                 glp_set_mat_row(lp, row, K ? 4 : 3, indices, values);
+
+                row_to_cmi.emplace_back(CmiTriplet{A,B,K});
             }
         }
     }
@@ -117,20 +125,8 @@ void add_elemental_inequalities(glp_prob* lp, int num_vars)
 // ParserOutput
 //----------------------------------------
 
-double SparseVector::get(int i) const
-{
-    auto&& it = entries.find(i);
-    if (it != entries.end())
-        return it->second;
-    return 0;
-}
-
-void SparseVector::inc(int i, double v)
-{
-    entries[i] += v;
-}
-
-void ParserOutput::add_term(SparseVector& v, const ast::Term& t, double scale)
+void ParserOutput::add_term(SparseVector& v, SparseVectorT<CmiTriplet>& cmi_v,
+                            const ast::Term& t, double scale)
 {
     const ast::Quantity& q = t.quantity;
     double coef = scale * t.coefficient;
@@ -184,6 +180,35 @@ void ParserOutput::add_term(SparseVector& v, const ast::Term& t, double scale)
     }
     if (c)
         v.inc(c, -coef);
+
+    // Also write the term using conditional mutual informations. That is, don't go all the way down
+    // to individual entropies.
+    if (num_parts == 1)
+    {
+        cmi_v.inc(CmiTriplet{set_indices[0], set_indices[0], c}, coef);
+    }
+    else
+    {
+        // I(X₁:…:Xₙ|Y) = - Σ (-1)^|T| H(T|Y)
+        // = - Σ (-1)^|T'| (H(T'|Y) - H(T',X_n|Y)) = Σ (-1)^|T'| H(X_n|T',Y)
+        // = Σ (-1)^|T''| (H(X_n|T'',Y) - H(X_n|T'',X_{n-1},Y))
+        // = Σ (-1)^|T''| I(X_{n-1},X_n | T'',Y)
+        // where T' excludes X_n, and T'' excludes X_{n-1} as well.
+
+        int num_subsets = 1 << (num_parts - 2);
+        for (int set = 0; set < num_subsets; ++set)
+        {
+            int s = 1;
+            int z = c;
+            for (int i = 0; i < num_parts - 2; ++i) {
+                if (set & 1<<i) {
+                    c |= set_indices[i];
+                    s = -s;
+                }
+            }
+            cmi_v.inc(CmiTriplet{set_indices[num_parts-2], set_indices[num_parts-1], z}, s*coef);
+        }
+    }
 }
 
 int ParserOutput::get_var_index(const std::string& s)
@@ -206,12 +231,18 @@ int ParserOutput::get_set_index(const ast::VarList& l)
     return idx;
 }
 
-void ParserOutput::add_relation(SparseVector v, bool is_inquiry)
+void ParserOutput::add_relation(SparseVector v, SparseVectorT<CmiTriplet> cmi_v, bool is_inquiry)
 {
     if (is_inquiry)
+    {
         inquiries.push_back(move(v));
+        cmi_inquiries.push_back(move(cmi_v));
+    }
     else
+    {
         constraints.push_back(move(v));
+        cmi_constraints.push_back(move(cmi_v));
+    }
 }
 
 void ParserOutput::relation(ast::Relation re)
@@ -226,12 +257,13 @@ void ParserOutput::relation(ast::Relation re)
     int l_sign = re.relation == ast::REL_LE ? -1 : 1;
     int r_sign = -l_sign;
     SparseVector v;
-    v.is_equality = re.relation == ast::REL_EQ;
+    SparseVectorT<CmiTriplet> cmi_v;
+    cmi_v.is_equality = v.is_equality = (re.relation == ast::REL_EQ);
     for (auto&& term : re.left)
-        add_term(v, term, l_sign);
+        add_term(v, cmi_v, term, l_sign);
     for (auto&& term : re.right)
-        add_term(v, term, r_sign);
-    add_relation(v, is_inquiry);
+        add_term(v, cmi_v, term, r_sign);
+    add_relation(move(v), move(cmi_v), is_inquiry);
 }
 
 void ParserOutput::mutual_independence(ast::MutualIndependence mi)
@@ -240,14 +272,25 @@ void ParserOutput::mutual_independence(ast::MutualIndependence mi)
     // 0 = H(a) + H(b) + H(c) + … - H(a,b,c,…)
     int all = 0;
     SparseVector v;
-    v.is_equality = true;
+    SparseVectorT<CmiTriplet> cmi_v;
+    cmi_v.is_equality = v.is_equality = true;
     for (auto&& vl : mi) {
         int idx = get_set_index(vl);
         all |= idx;
         v.inc(idx, 1);
+        cmi_v.inc(CmiTriplet{idx,idx,0}, 1);
     }
     v.inc(all, -1);
-    add_relation(move(v), is_inquiry);
+    cmi_v.inc(CmiTriplet{all,all,0}, -1);
+    add_relation(move(v), move(cmi_v), is_inquiry);
+
+    // // Independence of all disjoint subsets.
+    // SparseVectorT<CmiTriplet> cmi_v;
+    // cmi_v.is_equality = true;
+    // int num_subsets = 1 << mi.size();
+    // for (int i = 1; i < num_subsets; ++i)
+    // {
+    // }
 }
 
 void ParserOutput::markov_chain(ast::MarkovChain mc)
@@ -261,12 +304,14 @@ void ParserOutput::markov_chain(ast::MarkovChain mc)
         c = get_set_index(mc[i+2]);
         // 0 = I(a:c|b) = H(a|b) + H(c|b) - H(a,c|b)
         SparseVector v;
-        v.is_equality = true;
+        SparseVectorT<CmiTriplet> cmi_v;
+        cmi_v.is_equality = v.is_equality = true;
+        cmi_v.inc(CmiTriplet{a,c,b}, 1);
         v.inc(a|b, 1);
         v.inc(c|b, 1);
         v.inc(b, -1);
         v.inc(a|b|c, -1);
-        add_relation(move(v), is_inquiry);
+        add_relation(move(v), move(cmi_v), is_inquiry);
     }
 }
 
@@ -277,10 +322,12 @@ void ParserOutput::function_of(ast::FunctionOf fo)
     int of = get_set_index(fo.of);
     // 0 = H(func|of) = H(func,of) - H(of)
     SparseVector v;
-    v.is_equality = true;
+    SparseVectorT<CmiTriplet> cmi_v;
+    cmi_v.is_equality = v.is_equality = true;
+    cmi_v.inc(CmiTriplet{func,func,of}, 1);
     v.inc(func|of, 1);
     v.inc(of, -1);
-    add_relation(move(v), is_inquiry);
+    add_relation(move(v), move(cmi_v), is_inquiry);
 }
 
 
@@ -334,48 +381,41 @@ void LinearProblem::add(const SparseVector& v)
             indices.data()-1, values.data()-1);
 }
 
-void LinearProblem::print_variable(std::ostream& out, int v)
-{
-    out << "v" + v;
-}
-
-static void print_coeff(std::ostream& out, double c, bool first)
+void print_coeff(std::ostream& out, double c, bool first)
 {
     if (!first)
-        if (c >= 0)
-            out << " + " << c;
-        else
-            out << " - " << -c;
-    else
-        out << c;
-}
-
-void LinearProblem::print_row(std::ostream& out, int i)
-{
-    int num_nonzero_cols = glp_get_mat_row(lp, i, NULL, NULL);
-    std::vector<int> col_idxs(num_nonzero_cols + 1);
-    std::vector<double> coeffs(num_nonzero_cols + 1);
-    glp_get_mat_row(lp, i, col_idxs.data(), coeffs.data());
-
-    for (int j = 1; j <= num_nonzero_cols; ++j)
     {
-        print_coeff(out, coeffs[j], j == 1);
-        out << ' ';
-        print_variable(out, col_idxs[j]);
+        if (c >= 0)
+            out << " + ";
+        else
+        {
+            out << " - ";
+            c = -c;
+        }
     }
+
+    if (c != 1.0)
+        out << c << ' ';
 }
 
-bool LinearProblem::check(const SparseVector& v)
+std::ostream& operator<<(std::ostream& out, const LinearVariable& v)
+{
+    out << 'v' << v;
+    return out;
+}
+
+LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_rules, bool want_proof)
 {
     // check for equalities as I>=0 and -I>=0
-    if (v.is_equality) {
-        SparseVector v2(v);
+    if (I.is_equality) {
+        std::cout << "Warning: unimplemented equality proof generation.\n";
+        SparseVector v2(I);
         v2.is_equality = false;
         if (!check(v2))
-            return false;
+            return LinearProof();
         for (auto&& ent : v2.entries)
             ent.second = -ent.second;
-        return check(v2);
+        return prove_impl(I, num_regular_rules, want_proof);
     }
 
     glp_smcp parm;
@@ -387,7 +427,7 @@ bool LinearProblem::check(const SparseVector& v)
     int num_rows = glp_get_num_rows(lp);
 
     for (int i = 1; i <= num_cols; ++i)
-        glp_set_obj_coef(lp, i, v.get(i));
+        glp_set_obj_coef(lp, i, I.get(i));
 
     int outcome = glp_simplex(lp, &parm);
     if (outcome != 0) {
@@ -400,21 +440,29 @@ bool LinearProblem::check(const SparseVector& v)
         // the original check was for the solution (primal variable values)
         // rather than objective value, but let's do it simpler for now (if
         // an optimum is found, it should be zero anyway):
-        if (glp_get_obj_val(lp) >= -v.get(0))
+        if (glp_get_obj_val(lp) >= -I.get(0))
         {
-            std::cout << "Proof:\n";
+            LinearProof proof;
+            proof.initialized = true;
+
+            if (!want_proof)
+                return proof;
+
+            proof.objective = I;
+            proof.objective.is_equality = false;
+
+            if (std::abs(I.get(0)) > 1e-9)
+                proof.dual_solution.entries[0] = I.get(0);
 
             for (int j = 1; j <= num_cols; ++j)
             {
+                proof.variables.emplace_back(LinearVariable{j});
+                proof.regular_constraints.emplace_back(NonNegativityRule{j}); // (NonNegativityRule<LinearVariable>{ LinearVariable{i} });
+
                 int stat = glp_get_col_stat(lp, j);
                 double coeff = glp_get_col_dual(lp, j);
                 if (stat == GLP_NL && std::abs(coeff) > 1e-9)
-                {
-                    print_coeff(std::cout, coeff, false);
-                    std::cout << " (";
-                    print_variable(std::cout, j);
-                    std::cout << " >= " << glp_get_col_lb(lp, j) << ")\n";
-                }
+                    proof.dual_solution.entries[j] = coeff;
             }
 
             for (int i = 1; i <= num_rows; ++i)
@@ -422,27 +470,47 @@ bool LinearProblem::check(const SparseVector& v)
                 int stat = glp_get_row_stat(lp, i);
                 double coeff = glp_get_row_dual(lp, i);
                 if ((stat == GLP_NL || stat == GLP_NS) && std::abs(coeff) > 1e-9)
-                {
-                    print_coeff(std::cout, coeff, false);
-                    std::cout << " (";
-                    print_row(std::cout, i);
-                    std::cout
-                        << (stat == GLP_NS ? " == " : " >= ")
-                        << glp_get_row_lb(lp, i) << ")\n";
-                }
+                    proof.dual_solution.entries[i + num_cols] = coeff;
             }
 
-            return true;
+            std::vector<int> col_idxs;
+            std::vector<double> coeffs;
+            for (int i = num_regular_rules + 1; i <= num_rows; ++i)
+            {
+                int num_nonzero_cols = glp_get_mat_row(lp, i, NULL, NULL);
+                col_idxs.resize(num_nonzero_cols + 1);
+                coeffs.resize(num_nonzero_cols + 1);
+                glp_get_mat_row(lp, i, col_idxs.data(), coeffs.data());
+
+                int row_type = glp_get_row_type(lp, i);
+
+                proof.custom_constraints.emplace_back();
+                auto& constraint = proof.custom_constraints.back();
+                for (int j = 1; j <= num_nonzero_cols; ++j)
+                    constraint.inc(col_idxs[j], row_type == GLP_UP ? -coeffs[j] : coeffs[j]);
+
+                double const_offset = 0.0;
+                if (row_type == GLP_UP)
+                    const_offset = glp_get_row_ub(lp, i);
+                else if (row_type == GLP_LO)
+                    const_offset = -glp_get_row_lb(lp, i);
+                if (std::abs(const_offset) > 1e-9)
+                    constraint.entries[0] = const_offset;
+
+                constraint.is_equality = (row_type == GLP_FX);
+            }
+
+            return proof;
         }
         else
         {
             // TODO: Counterexample.
-            return false;
+            return LinearProof();
         }
     }
 
     if (status == GLP_UNBND) {
-        return false;
+        return LinearProof();
     }
 
     // I am not sure about the exact distinction of GLP_NOFEAS, GLP_INFEAS,
@@ -453,30 +521,628 @@ bool LinearProblem::check(const SparseVector& v)
 }
 
 
-ShannonTypeProblem::ShannonTypeProblem(std::vector<std::string> var_names_)
-    : LinearProblem(), var_names(std::move(var_names_))
+ShannonTypeProblem::ShannonTypeProblem(std::vector<std::string> random_var_names_)
+    : LinearProblem(), random_var_names(std::move(random_var_names_))
 {
-    int num_vars = var_names.size();
+    int num_vars = random_var_names.size();
     check_num_vars(num_vars);
     add_columns((1<<num_vars) - 1);
     add_elemental_inequalities(lp, num_vars);
 }
 
-void ShannonTypeProblem::print_variable(std::ostream& out, int v)
+ShannonTypeProblem::ShannonTypeProblem(const ParserOutput& out)
+    : ShannonTypeProblem(out.var_names)
 {
-    out << "H(";
+    for (int i = 0; i < out.constraints.size(); ++i)
+        add(out.constraints[i], out.cmi_constraints[i]);
+}
+
+void ShannonTypeProblem::add(const SparseVector& v, SparseVectorT<CmiTriplet> cmi_v)
+{
+    LinearProblem::add(v);
+    cmi_constraints.push_back(move(cmi_v));
+}
+
+static void print_var_subset(std::ostream& out, int v,
+                             const std::vector<std::string>& random_var_names)
+{
     for (int i = 0; v; ++i)
     {
         if (v & 1)
         {
-            out << var_names[i];
+            out << random_var_names[i];
             if (v >>= 1)
                 out << ',';
         }
         else
             v >>= 1;
     }
+}
+
+std::ostream& operator<<(std::ostream& out, const ShannonVar::PrintVarsOut& pvo)
+{
+    print_var_subset(out, pvo.parent.v, pvo.parent.random_var_names);
+    return out;
+}
+
+std::ostream& operator<<(std::ostream& out, const ShannonVar& sv)
+{
+    return out << "H(" << sv.print_vars() << ')';
+}
+
+void ShannonRule::print(std::ostream& out, const ShannonVar* vars) const
+{
+    auto [a, b, z] = CmiTriplet(*this);
+    out << "H(" << vars[a].print_vars();
+    if (a != b)
+        out << "; " << vars[b].print_vars();
+    if (z != 0)
+        out << " | " << vars[z].print_vars();
+    out << ") >= 0";
+}
+
+ShannonTypeProof ShannonTypeProblem::prove(const SparseVector& I,
+                                           SparseVectorT<CmiTriplet> cmi_I)
+{
+    ShannonTypeProof proof(
+        LinearProblem::prove(I, row_to_cmi),
+        [&] (const LinearVariable& v) { return ShannonVar{random_var_names, v.id}; },
+        [&] (const NonNegativityOrOtherRule<CmiTriplet>& r) -> ShannonRule {
+            if (r.index() == 0)
+                return ShannonRule{std::get<0>(r).v, std::get<0>(r).v, 0};
+            else
+                return ShannonRule(std::get<1>(r));
+        });
+    proof.cmi_constraints = cmi_constraints;
+    proof.cmi_objective = move(cmi_I);
+
+    return proof;
+}
+
+
+// Simplify the Shannon bounds in a proof by combining them into conditional mutual informations.
+struct ShannonProofSimplifier
+{
+    typedef ExtendedShannonRule Rule;
+
+    ShannonProofSimplifier(ShannonProofSimplifier&&) = default;
+    ~ShannonProofSimplifier();
+    ShannonProofSimplifier(const ShannonTypeProof&);
+
+    double cmi_complexity_cost(CmiTriplet t) const;
+
+    // How much to use each type of (in)equality:
+    std::map<CmiTriplet, double> cmi_coefficients;
+    std::map<Rule, double> rule_coefficients;
+
+    Matrix custom_constraints;
+    SparseVector objective;
+    const ShannonTypeProof& orig_proof;
+
+    operator SimplifiedShannonProof() const;
+
+    int num_rows = 0;
+    std::map<CmiTriplet, int> cmi_indices; // rows represent conditional mutual informations.
+    int get_row_index(CmiTriplet t);
+
+    int num_cols = 0;
+    std::map<Rule, int> rule_indices;
+    std::pair<int, bool> check_add_rule_idx(const Rule& r);
+    int get_rule_index(const Rule& r) { return check_add_rule_idx(r).first; }
+    int add_cols(bool eq);
+
+    void add_rule(const Rule& r);
+
+    glp_prob* lp = NULL;
+    const std::vector<std::string>& random_var_names;
+};
+
+SimplifiedShannonProof ShannonTypeProof::simplify() const
+{
+    return ShannonProofSimplifier(*this);
+}
+
+// Divide the rules being used into inequalities and equalities. Each rule gets its own cost of use.
+// First, the inequalities consist mainly of the non-negativity of conditional mutual information.
+// Equality rules connect the different kinds of information together:
+//
+// Inequality:
+// CMI nonneg.                    I(a;b|z) >= 0
+// Learning reduces entropy       I(a|z) >= I(a|b,z) (CMI nonneg I(a;b|z) and CMI defn. 3)
+// More variables more entropy    I(a,b|z) >= I(a|z) (CMI nonneg I(b|a,z) and chain rule)
+// (Combined into monotone:)      I(a,b|z) >= I(a|c,z)
+//
+// Equality:
+// CMI defn. 1                    I(a;b|c,z) = I(a,c|z) + I(b,c|z) - I(a,b,c|z) - I(c|z)
+// CMI defn. 2                    I(a;b|z) = I(a|z) + I(b|z) - I(a,b|z)
+// CMI defn. 3                    I(a;b|z) = I(a|z) - I(a|b,z)
+// chain rule:                    I(c|z) + I(a;b|c,z) = I(a,c;b,c|z)
+// mutual information chain rule: I(a;c|z) + I(a;b|c,z) = I(a;b,c|z)
+//
+// CMI defn. 2 is the same as the two-set inclusion-exclusion principle.
+//
+// Implicitly used meta-rules:
+// I(a;b|z) = I(b;a|z) (symmetry)
+// I(a,a,b;c|z) = I(a,b;c|z) and I(a;b|c,c,z)=I(a;b|c,z) (redundancy)
+// I(a;|z) = 0 (trivial rule)
+// I(a;b|c,z) = I(a;b,c|c,z) (redundancy and trivial rule, combined with MI chain rule)
+
+const double information_cost                    = 1.0;
+const double conditional_information_cost        = 1.5;
+const double mutual_information_cost             = 2.0;
+const double conditional_mutual_information_cost = 3.0;
+
+// Cost of using the bound I(a;b|c) >= 0 where t == (a, b, c).
+double ShannonProofSimplifier::cmi_complexity_cost(CmiTriplet t) const
+{
+    if (t[0] == t[1])
+        if (t[2] == 0)
+            return information_cost;
+        else
+            return conditional_information_cost;
+    else
+        if (t[2] == 0)
+            return mutual_information_cost;
+        else
+            return conditional_mutual_information_cost;
+}
+
+double ExtendedShannonRule::complexity_cost() const
+{
+    auto [z, a, b, c] = subsets;
+
+    switch (type)
+    {
+    case CMI_DEF_I:
+        // I(a;b|c,z) = I(a,c|z) + I(b,c|z) - I(a,b,c|z) - I(c|z)
+        return conditional_mutual_information_cost;
+
+    case MI_DEF_I:
+        // I(a;b|z) = I(a|z) + I(b|z) - I(a,b|z)
+        return mutual_information_cost;
+
+    case MI_DEF_CI:
+        // I(a;b|z) = I(a|z) - I(a|b,z)
+        return mutual_information_cost;
+
+    case CHAIN:
+        // I(c|z) + I(a;b|c,z) = I(a,c;b,c|z)
+        if (a == b)
+            return conditional_information_cost;
+        else
+            return conditional_mutual_information_cost;
+
+    case MUTUAL_CHAIN:
+        // I(a;c|z) + I(a;b|c,z) = I(a;b,c|z)
+        return conditional_mutual_information_cost + 1.0;
+
+    case MONOTONE:
+        // I(a,b|z) >= I(a|c,z)
+        if (b == 0 || c == 0)
+            return 0.6;
+        else
+            return 1.0;
+
+    default:
+#ifdef __GNUC__
+        __builtin_unreachable();
+#endif
+        return 0.0;
+    }
+}
+
+void ShannonProofSimplifier::add_rule(const Rule& r)
+{
+    auto [idx, inserted] = check_add_rule_idx(r);
+    if (!inserted)
+        return;
+
+    auto [z, a, b, c] = r.subsets;
+
+    SparseVector constraint;
+    switch (r.type)
+    {
+    case Rule::CMI_DEF_I:
+        // I(a;b|c,z) = I(a,c|z) + I(b,c|z) - I(a,b,c|z) - I(c|z)
+        constraint.inc(get_row_index({a, b, c|z}),       1.0);
+        constraint.inc(get_row_index({a|c, a|c, z}),    -1.0);
+        constraint.inc(get_row_index({b|c, b|c, z}),    -1.0);
+        constraint.inc(get_row_index({a|b|c, a|b|c, z}), 1.0);
+        constraint.inc(get_row_index({c, c, z}),         1.0);
+        break;
+
+    case Rule::MI_DEF_I:
+        // I(a;b|z) = I(a|z) + I(b|z) - I(a,b|z)
+        constraint.inc(get_row_index({a, b, z}),      1.0);
+        constraint.inc(get_row_index({a, a, z}),     -1.0);
+        constraint.inc(get_row_index({b, b, z}),     -1.0);
+        constraint.inc(get_row_index({a|b, a|b, z}),  1.0);
+        break;
+
+    case Rule::MI_DEF_CI:
+        // I(a;b|z) = I(a|z) - I(a|b,z)
+        constraint.inc(get_row_index({a, b, z}),   1.0);
+        constraint.inc(get_row_index({a, a, z}),  -1.0);
+        constraint.inc(get_row_index({a, a, b|z}), 1.0);
+        break;
+
+    case Rule::CHAIN:
+        // I(c|z) + I(a;b|c,z) = I(a,c;b,c|z)
+        constraint.inc(get_row_index({c, c, z}),      1.0);
+        constraint.inc(get_row_index({a, b, c|z}),    1.0);
+        constraint.inc(get_row_index({a|c, b|c, z}), -1.0);
+        break;
+
+    case Rule::MUTUAL_CHAIN:
+        // I(a;c|z) + I(a;b|c,z) = I(a;b,c|z)
+        constraint.inc(get_row_index({a, c, z}),    1.0);
+        constraint.inc(get_row_index({a, b, c|z}),  1.0);
+        constraint.inc(get_row_index({a, b|c, z}), -1.0);
+        break;
+
+    case Rule::MONOTONE:
+        // I(a,b|z) >= I(a|c,z)
+        constraint.inc(get_row_index({a|b, a|b, z}), 1.0);
+        constraint.inc(get_row_index({a, a, c|z}),  -1.0);
+        break;
+
+    default:
+#ifdef __GNUC__
+        __builtin_unreachable();
+#endif
+        return;
+    }
+
+    int indices[6];
+    double values[6];
+    int count = 0;
+    for (auto [i, v] : constraint.entries)
+    {
+        indices[++count] = i;
+        values[count] = v;
+    }
+
+    glp_set_mat_col(lp, idx, count, indices, values);
+    if (r.is_equality())
+        glp_set_mat_col(lp, idx + 1, count, indices, values);
+}
+
+ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proof_) :
+    orig_proof(orig_proof_),
+    random_var_names(orig_proof.variables[0].random_var_names)
+{
+    if (!orig_proof)
+        return;
+
+    lp = glp_create_prob();
+    glp_set_obj_dir(lp, GLP_MIN);
+
+    int num_vars = random_var_names.size();
+    check_num_vars(num_vars);
+    int full_set = (1 << num_vars) - 1;
+
+    // Add rules (other than CMI non negativity, which is implicit.)
+    for (int z = 0; z < full_set; ++z)
+    {
+        for (int a : util::skip_n(util::disjoint_subsets(z, full_set), 1))
+        {
+            for (int b : util::skip_n(util::disjoint_subsets(z, full_set), 1))
+            {
+                if (a != b)
+                    add_rule(Rule{Rule::MI_DEF_CI, z, a, b, 0});
+
+                if (a < b)
+                {
+                    add_rule(Rule{Rule::MI_DEF_I, z, a, b, 0});
+
+                    for (int c : util::skip_n(util::disjoint_subsets(z|a|b, full_set), 1))
+                        add_rule(Rule{Rule::CMI_DEF_I, z, a, b, c});
+                }
+
+                for (int c : util::skip_n(util::disjoint_subsets(z|a|b, full_set), 1))
+                {
+                    if (a <= b)
+                        add_rule(Rule{Rule::CHAIN, z, a, b, c});
+                    add_rule(Rule{Rule::MUTUAL_CHAIN, z, a, b, c});
+                }
+
+                if ((a & b) == 0)
+                    for (int c : util::disjoint_subsets(z|a, full_set))
+                        add_rule(Rule{Rule::MONOTONE, z, a, b, c});
+            }
+
+            for (int c : util::skip_n(util::disjoint_subsets(z|a, full_set), 1))
+                add_rule(Rule{Rule::MONOTONE, z, a, 0, c});
+        }
+    }
+
+    std::vector<double> row_upper_bounds(num_rows + 1, 0.0);
+
+    // Include exactly the same custom constraints as in the original proof.
+    for (auto [i, coeff] : orig_proof.dual_solution.entries)
+    {
+        if (coeff != 0.0 && i > orig_proof.regular_constraints.size())
+        {
+            const auto& c = orig_proof.cmi_constraints[i - orig_proof.regular_constraints.size() - 1];
+            for (auto [cmi, v] : c.entries)
+                row_upper_bounds[get_row_index(cmi)] -= coeff * v;
+        }
+    }
+
+    // Instead of using the dual_solution's combination of cmi constraints (which are an arbitrary
+    // representation of the objective function), use the original CMI representation of the
+    // objective.
+    for (auto [cmi, v] : orig_proof.cmi_objective.entries)
+    {
+        int row = get_row_index(cmi);
+        row_upper_bounds[row] += v;
+        objective.inc(row, v);
+    }
+
+    for (int i = 1; i < row_upper_bounds.size(); ++i)
+        glp_set_row_bnds(lp, i, GLP_UP, NAN, row_upper_bounds[i]);
+
+    // Optimize complexity of proof. Note that here L0 norm (weight if rule used) is approximated by
+    // L1 norm (weight proportional to use).
+    std::vector<double> obj(num_cols + 1, 0.0);
+
+    // cols are easy:
+    for (auto [r, col] : rule_indices)
+    {
+        double cost = r.complexity_cost();
+        obj[col] += cost;
+        if (r.is_equality())
+            obj[col + 1] -= cost;
+    }
+
+    // rows have to be sent through the constraint map to get the objective.
+    for (auto [t, row] : cmi_indices)
+    {
+        double cost = cmi_complexity_cost(t);
+
+        int num_nonzero_cols = glp_get_mat_row(lp, row, NULL, NULL);
+        std::vector<int> col_idxs(num_nonzero_cols + 1);
+        std::vector<double> coeffs(num_nonzero_cols + 1);
+        glp_get_mat_row(lp, row, col_idxs.data(), coeffs.data());
+        for (int j = 1; j <= num_nonzero_cols; ++j)
+            obj[col_idxs[j]] -= cost * coeffs[j];
+        obj[0] += cost * glp_get_row_ub(lp, row);
+    }
+
+    for (int i = 0; i <= num_cols; ++i)
+        glp_set_obj_coef(lp, i, obj[i]);
+
+    glp_write_lp(lp, 0, "simplify_debug.txt");
+
+    glp_smcp parm;
+    glp_init_smcp(&parm);
+    parm.msg_lev = GLP_MSG_ERR;
+    parm.meth = GLP_PRIMAL;
+
+    int outcome = glp_simplex(lp, &parm);
+    if (outcome != 0) {
+        throw std::runtime_error(sprint_all("Error in glp_simplex: ", outcome));
+    }
+
+    int status = glp_get_status(lp);
+    if (status != GLP_OPT)
+        throw std::runtime_error(sprint_all("no feasible solution (status code ", status, ")"));
+    else
+        std::cout << "Simplified to cost " << glp_get_obj_val(lp) << '\n';
+
+    for (auto [t, row] : cmi_indices)
+    {
+        int stat = glp_get_row_stat(lp, row);
+        double coeff = glp_get_row_ub(lp, row) - glp_get_row_prim(lp, row);
+        if (stat != GLP_NU && std::abs(coeff) > 1e-9)
+            cmi_coefficients[t] = coeff;
+    }
+
+    for (auto [r, col] : rule_indices)
+    {
+        int stat = glp_get_col_stat(lp, col);
+        int stat2 = GLP_NU;
+        double coeff = glp_get_col_prim(lp, col);
+
+        if (r.is_equality())
+        {
+            coeff += glp_get_col_prim(lp, col + 1);
+            stat2 = glp_get_col_stat(lp, col + 1);
+        }
+
+        if ((stat != GLP_NL || stat2 != GLP_NU) && std::abs(coeff) > 1e-9)
+            rule_coefficients[r] = coeff;
+    }
+
+    for (int i = 0; i < orig_proof.cmi_constraints.size(); ++i)
+    {
+        custom_constraints.emplace_back();
+        const auto& orig_constraint = orig_proof.cmi_constraints[i];
+        auto& constraint = custom_constraints.back();
+        constraint.is_equality = orig_constraint.is_equality;
+        for (const auto& [cmi, v] : orig_constraint.entries)
+            constraint.inc(get_row_index(cmi), v);
+    }
+}
+
+ShannonProofSimplifier::~ShannonProofSimplifier()
+{
+    if (lp)
+        glp_delete_prob(lp);
+}
+
+ShannonProofSimplifier::operator SimplifiedShannonProof() const
+{
+    if (!lp)
+        return SimplifiedShannonProof();
+
+    SimplifiedShannonProof proof;
+    proof.initialized = true;
+
+    proof.variables.resize(num_rows);
+    for (auto [t, i] : cmi_indices)
+        proof.variables[i - 1] = ExtendedShannonVar{t, &random_var_names};
+
+    proof.regular_constraints.resize(num_rows + num_cols);
+    for (auto [t, i] : cmi_indices)
+        proof.regular_constraints[i - 1] = NonNegativityOrOtherRule<Rule>(
+            NonNegativityOrOtherRule<Rule>::Parent(std::in_place_index_t<0>(), cmi_indices.at(t)));
+    for (auto [r, i] : rule_indices)
+        proof.regular_constraints[i + num_rows - 1] = NonNegativityOrOtherRule<Rule>(
+            NonNegativityOrOtherRule<Rule>::Parent(std::in_place_index_t<1>(), r));
+
+    for (auto [t, v] : cmi_coefficients)
+        proof.dual_solution.inc(cmi_indices.at(t), v);
+
+    for (auto [r, v] : rule_coefficients)
+        proof.dual_solution.inc(rule_indices.at(r) + num_rows, v);
+
+    for (int i = 0; i < orig_proof.cmi_constraints.size(); ++i)
+    {
+        int orig_row = orig_proof.regular_constraints.size() + i + 1;
+        int row = proof.regular_constraints.size() + i + 1;
+        proof.dual_solution.inc(row, orig_proof.dual_solution.get(orig_row));
+    }
+
+    proof.custom_constraints = custom_constraints;
+    proof.objective = objective;
+
+    return proof;
+}
+
+int ShannonProofSimplifier::get_row_index(CmiTriplet t)
+{
+    if (t[0] > t[1])
+        std::swap(t[0], t[1]);
+
+    auto pair = cmi_indices.insert(std::make_pair(t, num_rows + 1));
+    if (pair.second)
+    {
+        glp_add_rows(lp, 1);
+        glp_set_row_bnds(lp, ++num_rows, GLP_UP, NAN, 0.0);
+    }
+    return pair.first->second;
+}
+
+std::pair<int, bool> ShannonProofSimplifier::check_add_rule_idx(const Rule& r)
+{
+    auto pair = rule_indices.insert(std::make_pair(r, num_cols + 1));
+    if (pair.second)
+        add_cols(r.is_equality());
+    return std::make_pair(pair.first->second, pair.second);
+}
+
+int ShannonProofSimplifier::add_cols(bool eq)
+{
+    glp_add_cols(lp, eq ? 2 : 1);
+    glp_set_col_bnds(lp, ++num_cols, GLP_LO, 0.0, NAN);
+    int idx = num_cols;
+    if (eq)
+        glp_set_col_bnds(lp, ++num_cols, GLP_UP, NAN, 0.0);
+    return idx;
+}
+
+std::ostream& operator<<(std::ostream& out, const ExtendedShannonVar& t)
+{
+    out << "I(";
+    print_var_subset(out, t[0], *t.random_var_names);
+
+    if (t[1] != t[0])
+    {
+        out << "; ";
+        print_var_subset(out, t[1], *t.random_var_names);
+    }
+
+    if (t[2])
+    {
+        out << " | ";
+        print_var_subset(out, t[2], *t.random_var_names);
+    }
+
     out << ')';
+    return out;
+}
+
+void ExtendedShannonRule::print(std::ostream& out, const ExtendedShannonVar* vars) const
+{
+    const std::vector<std::string>* random_var_names = vars[1].random_var_names;
+    auto [z, a, b, c] = subsets;
+
+    auto print_cmi = [&] (const CmiTriplet& t) {
+        out << ExtendedShannonVar {t, random_var_names};
+    };
+
+    switch (type)
+    {
+    case CMI_DEF_I:
+        // I(a;b|c,z) = I(a,c|z) + I(b,c|z) - I(a,b,c|z) - I(c|z)
+        print_cmi({a, b, c|z});
+        out << " - ";
+        print_cmi({a|c, a|c, z});
+        out << " - ";
+        print_cmi({b|c, b|c, z});
+        out << " + ";
+        print_cmi({a|b|c, a|b|c, z});
+        out << " + ";
+        print_cmi({c, c, z});
+        break;
+
+    case MI_DEF_I:
+        // I(a;b|z) = I(a|z) + I(b|z) - I(a,b|z)
+        print_cmi({a, b, z});
+        out << " - ";
+        print_cmi({a, a, z});
+        out << " - ";
+        print_cmi({b, b, z});
+        out << " + ";
+        print_cmi({a|b, a|b, z});
+        break;
+
+    case MI_DEF_CI:
+        // I(a;b|z) = I(a|z) - I(a|b,z)
+        print_cmi({a, b, z});
+        out << " - ";
+        print_cmi({a, a, z});
+        out << " + ";
+        print_cmi({a, a, b|z});
+        break;
+
+    case CHAIN:
+        // I(c|z) + I(a;b|c,z) = I(a,c;b,c|z)
+        print_cmi({c, c, z});
+        out << " + ";
+        print_cmi({a, b, c|z});
+        out << " - ";
+        print_cmi({a|c, b|c, z});
+        break;
+
+    case MUTUAL_CHAIN:
+        // I(a;c|z) + I(a;b|c,z) = I(a;b,c|z)
+        print_cmi({a, c, z});
+        out << " + ";
+        print_cmi({a, b, c|z});
+        out << " - ";
+        print_cmi({a, b|c, z});
+        break;
+
+    case MONOTONE:
+        // I(a,b|z) >= I(a|c,z)
+        print_cmi({a|b, a|b, z});
+        out << " - ";
+        print_cmi({a, a, c|z});
+        break;
+
+    default:
+#ifdef __GNUC__
+        __builtin_unreachable();
+#endif
+        return;
+    }
+
+    if (is_equality())
+        out << " == 0";
+    else
+        out << " >= 0";
 }
 
 
@@ -528,11 +1194,10 @@ ParserOutput parse(const std::vector<std::string>& exprs)
 bool check(const ParserOutput& out)
 {
     ShannonTypeProblem prob(out.var_names);
-    for (auto&& constraint : out.constraints)
-        prob.add(constraint);
-    for (auto&& inquiry : out.inquiries) {
-        if (!prob.check(inquiry))
+    for (int i = 0; i < out.constraints.size(); ++i)
+        prob.add(out.constraints[i], out.cmi_constraints[i]);
+    for (int i = 0; i < out.constraints.size(); ++i)
+        if (!prob.check(out.inquiries[i]))
             return false;
-    }
     return true;
 }

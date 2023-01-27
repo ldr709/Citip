@@ -32,7 +32,21 @@ try
         copy(line_iterator(cin), line_iterator(), back_inserter(expr));
     }
 
-    bool success = check(parse(expr));
+    ParserOutput out = parse(expr);
+    ShannonTypeProblem prob(out);
+    bool success = true;
+    for (int i = 0; i < out.inquiries.size(); ++i) {
+        //ShannonTypeProof proof = prob.prove(inquiry);
+        SimplifiedShannonProof proof = prob.prove(out.inquiries[i], out.cmi_inquiries[i]).simplify();
+        // TODO: try LinearTypeProof
+        if (proof)
+            std::cout << proof << '\n';
+        else
+        {
+            success = false;
+            break;
+        }
+    }
 
     if (success) {
         cerr << "The information expression is TRUE." << endl;
