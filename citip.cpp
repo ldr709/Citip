@@ -17,6 +17,8 @@
 using std::move;
 using util::sprint_all;
 
+static constexpr double eps = 1e-5;
+
 
 static void check_num_vars(int num_vars)
 {
@@ -455,7 +457,7 @@ LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_r
             proof.objective.is_equality = false;
 
             double const_term = glp_get_obj_val(lp) + I.get(0);
-            if (std::abs(const_term) > 1e-9)
+            if (std::abs(const_term) > eps)
                 proof.dual_solution.entries[0] = const_term;
 
             for (int j = 1; j <= num_cols; ++j)
@@ -465,7 +467,7 @@ LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_r
 
                 int stat = glp_get_col_stat(lp, j);
                 double coeff = glp_get_col_dual(lp, j);
-                if (stat == GLP_NL && std::abs(coeff) > 1e-9)
+                if (stat == GLP_NL && std::abs(coeff) > eps)
                     proof.dual_solution.entries[j] = coeff;
             }
 
@@ -473,7 +475,7 @@ LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_r
             {
                 int stat = glp_get_row_stat(lp, i);
                 double coeff = glp_get_row_dual(lp, i);
-                if ((stat == GLP_NL || stat == GLP_NS) && std::abs(coeff) > 1e-9)
+                if ((stat == GLP_NL || stat == GLP_NS) && std::abs(coeff) > eps)
                     proof.dual_solution.entries[i + num_cols] = coeff;
             }
 
@@ -498,7 +500,7 @@ LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_r
                     const_offset = glp_get_row_ub(lp, i);
                 else if (row_type == GLP_LO || row_type == GLP_FX)
                     const_offset = -glp_get_row_lb(lp, i);
-                if (std::abs(const_offset) > 1e-9)
+                if (std::abs(const_offset) > eps)
                     constraint.entries[0] = const_offset;
 
                 constraint.is_equality = (row_type == GLP_FX);
@@ -840,7 +842,8 @@ int ShannonProofSimplifier::get_row_index(CmiTriplet t)
 // L1 norm (weight proportional to use).
 ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proof_) :
     orig_proof(orig_proof_),
-    random_var_names(orig_proof.variables[0].random_var_names)
+    random_var_names(orig_proof.variables[0].random_var_names),
+    coin_constraints(true, 2.0, 2.0)
 {
     if (!orig_proof)
         return;
@@ -941,6 +944,8 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
 
     si->writeLp("simplify_debug");
 
+    std::cout << "Setting OsiDoDualInInitial: " << si->setHintParam(OsiDoDualInInitial, false, OsiHintDo) << '\n';
+    //std::cout << "Setting OsiDualTolerance: " << si->setDblParam(OsiDualTolerance, 0.01) << '\n';
     si->initialSolve();
 
     if (!si->isProvenOptimal()) {
@@ -956,7 +961,7 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
     for (auto [t, row] : cmi_indices)
     {
         double coeff = coin_rowub[row] - row_sol[row];
-        if (std::abs(coeff) > 1e-9)
+        if (std::abs(coeff) > eps)
             cmi_coefficients[t] = coeff;
     }
 
@@ -966,7 +971,7 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
         if (r.is_equality())
             coeff += col_sol[col + 1];
 
-        if (std::abs(coeff) > 1e-9)
+        if (std::abs(coeff) > eps)
             rule_coefficients[r] = coeff;
     }
 
