@@ -5,6 +5,9 @@
 #include <iostream>
 
 #include <glpk.h>
+#include <coin/OsiClpSolverInterface.hpp>
+#include <coin/CoinPackedMatrix.hpp>
+#include <coin/CoinPackedVector.hpp>
 
 #include "citip.hpp"
 #include "parser.hxx"
@@ -451,13 +454,14 @@ LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_r
             proof.objective = I;
             proof.objective.is_equality = false;
 
-            if (std::abs(I.get(0)) > 1e-9)
-                proof.dual_solution.entries[0] = I.get(0);
+            double const_term = glp_get_obj_val(lp) + I.get(0);
+            if (std::abs(const_term) > 1e-9)
+                proof.dual_solution.entries[0] = const_term;
 
             for (int j = 1; j <= num_cols; ++j)
             {
                 proof.variables.emplace_back(LinearVariable{j});
-                proof.regular_constraints.emplace_back(NonNegativityRule{j}); // (NonNegativityRule<LinearVariable>{ LinearVariable{i} });
+                proof.regular_constraints.emplace_back(NonNegativityRule{j-1}); // (NonNegativityRule<LinearVariable>{ LinearVariable{i} });
 
                 int stat = glp_get_col_stat(lp, j);
                 double coeff = glp_get_col_dual(lp, j);
@@ -492,7 +496,7 @@ LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_r
                 double const_offset = 0.0;
                 if (row_type == GLP_UP)
                     const_offset = glp_get_row_ub(lp, i);
-                else if (row_type == GLP_LO)
+                else if (row_type == GLP_LO || row_type == GLP_FX)
                     const_offset = -glp_get_row_lb(lp, i);
                 if (std::abs(const_offset) > 1e-9)
                     constraint.entries[0] = const_offset;
@@ -605,8 +609,7 @@ struct ShannonProofSimplifier
 {
     typedef ExtendedShannonRule Rule;
 
-    ShannonProofSimplifier(ShannonProofSimplifier&&) = default;
-    ~ShannonProofSimplifier();
+    ShannonProofSimplifier() = delete;
     ShannonProofSimplifier(const ShannonTypeProof&);
 
     double cmi_complexity_cost(CmiTriplet t) const;
@@ -621,19 +624,19 @@ struct ShannonProofSimplifier
 
     operator SimplifiedShannonProof() const;
 
-    int num_rows = 0;
     std::map<CmiTriplet, int> cmi_indices; // rows represent conditional mutual informations.
     int get_row_index(CmiTriplet t);
 
-    int num_cols = 0;
     std::map<Rule, int> rule_indices;
-    std::pair<int, bool> check_add_rule_idx(const Rule& r);
-    int get_rule_index(const Rule& r) { return check_add_rule_idx(r).first; }
-    int add_cols(bool eq);
+    int add_rule(const Rule& r);
 
-    void add_rule(const Rule& r);
+    // Coin problem
+    CoinPackedMatrix coin_constraints;
+    std::vector<double> coin_collb, coin_colub;
+    std::vector<double> coin_rowub;
+    std::vector<double> coin_obj;
+    double coin_infinity = 0.0;
 
-    glp_prob* lp = NULL;
     const std::vector<std::string>& random_var_names;
 };
 
@@ -731,12 +734,14 @@ double ExtendedShannonRule::complexity_cost() const
     }
 }
 
-void ShannonProofSimplifier::add_rule(const Rule& r)
+int ShannonProofSimplifier::add_rule(const Rule& r)
 {
-    auto [idx, inserted] = check_add_rule_idx(r);
+    auto [it, inserted] = rule_indices.insert(std::make_pair(r, coin_collb.size()));
+    int idx = it->second;
     if (!inserted)
-        return;
+        return idx;
 
+    bool eq = r.is_equality();
     auto [z, a, b, c] = r.subsets;
 
     SparseVector constraint;
@@ -790,23 +795,49 @@ void ShannonProofSimplifier::add_rule(const Rule& r)
 #ifdef __GNUC__
         __builtin_unreachable();
 #endif
-        return;
+        return -1;
     }
 
-    int indices[6];
-    double values[6];
+    int indices[5];
+    double values[5];
     int count = 0;
     for (auto [i, v] : constraint.entries)
     {
-        indices[++count] = i;
-        values[count] = v;
+        indices[count] = i;
+        values[count++] = v;
     }
 
-    glp_set_mat_col(lp, idx, count, indices, values);
-    if (r.is_equality())
-        glp_set_mat_col(lp, idx + 1, count, indices, values);
+    coin_constraints.appendCol(count, indices, values);
+    coin_collb.push_back(0.0);
+    coin_colub.push_back(coin_infinity);
+    if (eq)
+    {
+        coin_constraints.appendCol(count, indices, values);
+        coin_collb.push_back(-coin_infinity);
+        coin_colub.push_back(0.0);
+    }
+
+    return idx;
 }
 
+int ShannonProofSimplifier::get_row_index(CmiTriplet t)
+{
+    if (t[0] > t[1])
+        std::swap(t[0], t[1]);
+
+    auto [it, inserted] = cmi_indices.insert(std::make_pair(t, coin_rowub.size()));
+    int idx = it->second;
+    if (!inserted)
+        return idx;
+
+    coin_constraints.appendRow(0, nullptr, nullptr);
+    coin_rowub.push_back(0.0);
+
+    return idx;
+}
+
+// Optimize complexity of proof. Note that here L0 norm (weight if rule used) is approximated by
+// L1 norm (weight proportional to use).
 ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proof_) :
     orig_proof(orig_proof_),
     random_var_names(orig_proof.variables[0].random_var_names)
@@ -814,8 +845,8 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
     if (!orig_proof)
         return;
 
-    lp = glp_create_prob();
-    glp_set_obj_dir(lp, GLP_MIN);
+    OsiSolverInterface* si = new OsiClpSolverInterface();
+    coin_infinity = si->getInfinity();
 
     int num_vars = random_var_names.size();
     check_num_vars(num_vars);
@@ -856,8 +887,6 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
         }
     }
 
-    std::vector<double> row_upper_bounds(num_rows + 1, 0.0);
-
     // Include exactly the same custom constraints as in the original proof.
     for (auto [i, coeff] : orig_proof.dual_solution.entries)
     {
@@ -865,7 +894,7 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
         {
             const auto& c = orig_proof.cmi_constraints[i - orig_proof.regular_constraints.size() - 1];
             for (auto [cmi, v] : c.entries)
-                row_upper_bounds[get_row_index(cmi)] -= coeff * v;
+                coin_rowub[get_row_index(cmi)] -= coeff * v;
         }
     }
 
@@ -875,82 +904,69 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
     for (auto [cmi, v] : orig_proof.cmi_objective.entries)
     {
         int row = get_row_index(cmi);
-        row_upper_bounds[row] += v;
-        objective.inc(row, v);
+        coin_rowub[row] += v;
+        objective.inc(row + 1, v);
     }
+    objective.inc(0, orig_proof.objective.get(0));
 
-    for (int i = 1; i < row_upper_bounds.size(); ++i)
-        glp_set_row_bnds(lp, i, GLP_UP, NAN, row_upper_bounds[i]);
-
-    // Optimize complexity of proof. Note that here L0 norm (weight if rule used) is approximated by
-    // L1 norm (weight proportional to use).
-    std::vector<double> obj(num_cols + 1, 0.0);
+    coin_obj.resize(coin_collb.size(), 0.0);
+    double obj_offset = 0.0;
 
     // cols are easy:
     for (auto [r, col] : rule_indices)
     {
         double cost = r.complexity_cost();
-        obj[col] += cost;
+        coin_obj[col] += cost;
         if (r.is_equality())
-            obj[col + 1] -= cost;
+            coin_obj[col + 1] -= cost;
     }
 
     // rows have to be sent through the constraint map to get the objective.
+
+    std::vector<double> row_obj(coin_rowub.size(), 0.0);
     for (auto [t, row] : cmi_indices)
     {
         double cost = cmi_complexity_cost(t);
-
-        int num_nonzero_cols = glp_get_mat_row(lp, row, NULL, NULL);
-        std::vector<int> col_idxs(num_nonzero_cols + 1);
-        std::vector<double> coeffs(num_nonzero_cols + 1);
-        glp_get_mat_row(lp, row, col_idxs.data(), coeffs.data());
-        for (int j = 1; j <= num_nonzero_cols; ++j)
-            obj[col_idxs[j]] -= cost * coeffs[j];
-        obj[0] += cost * glp_get_row_ub(lp, row);
+        row_obj[row] -= cost;
+        obj_offset += cost * coin_rowub[row];
     }
 
-    for (int i = 0; i <= num_cols; ++i)
-        glp_set_obj_coef(lp, i, obj[i]);
+    std::vector<double> col_obj_from_row_obj(coin_collb.size(), 0.0);
+    coin_constraints.transposeTimes(row_obj.data(), col_obj_from_row_obj.data());
+    for (int i = 0; i < coin_collb.size(); ++i)
+        coin_obj[i] += col_obj_from_row_obj[i];
 
-    glp_write_lp(lp, 0, "simplify_debug.txt");
+    si->loadProblem(coin_constraints, coin_collb.data(), coin_colub.data(),
+                    coin_obj.data(), nullptr, coin_rowub.data());
 
-    glp_smcp parm;
-    glp_init_smcp(&parm);
-    parm.msg_lev = GLP_MSG_ERR;
-    parm.meth = GLP_PRIMAL;
+    si->writeLp("simplify_debug");
 
-    int outcome = glp_simplex(lp, &parm);
-    if (outcome != 0) {
-        throw std::runtime_error(sprint_all("Error in glp_simplex: ", outcome));
+    si->initialSolve();
+
+    if (!si->isProvenOptimal()) {
+        throw std::runtime_error("ShannonProofSimplifier: Failed to solve LP.");
     }
 
-    int status = glp_get_status(lp);
-    if (status != GLP_OPT)
-        throw std::runtime_error(sprint_all("no feasible solution (status code ", status, ")"));
-    else
-        std::cout << "Simplified to cost " << glp_get_obj_val(lp) << '\n';
+    std::cout << "Simplified to cost " << si->getObjValue() << '\n';
+
+    const double* col_sol = si->getColSolution();
+    std::vector<double> row_sol(coin_rowub.size(), 0.0);
+    coin_constraints.times(col_sol, row_sol.data());
 
     for (auto [t, row] : cmi_indices)
     {
-        int stat = glp_get_row_stat(lp, row);
-        double coeff = glp_get_row_ub(lp, row) - glp_get_row_prim(lp, row);
-        if (stat != GLP_NU && std::abs(coeff) > 1e-9)
+        double coeff = coin_rowub[row] - row_sol[row];
+        if (std::abs(coeff) > 1e-9)
             cmi_coefficients[t] = coeff;
     }
 
     for (auto [r, col] : rule_indices)
     {
-        int stat = glp_get_col_stat(lp, col);
-        int stat2 = GLP_NU;
-        double coeff = glp_get_col_prim(lp, col);
-
+        double coeff = col_sol[col];
         if (r.is_equality())
-        {
-            coeff += glp_get_col_prim(lp, col + 1);
-            stat2 = glp_get_col_stat(lp, col + 1);
-        }
+            coeff += col_sol[col + 1];
 
-        if ((stat != GLP_NL || stat2 != GLP_NU) && std::abs(coeff) > 1e-9)
+        if (std::abs(coeff) > 1e-9)
             rule_coefficients[r] = coeff;
     }
 
@@ -960,42 +976,39 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
         const auto& orig_constraint = orig_proof.cmi_constraints[i];
         auto& constraint = custom_constraints.back();
         constraint.is_equality = orig_constraint.is_equality;
+        if (orig_proof.custom_constraints[i].get(0) != 0.0)
+            constraint.inc(0, orig_proof.custom_constraints[i].get(0));
         for (const auto& [cmi, v] : orig_constraint.entries)
-            constraint.inc(get_row_index(cmi), v);
+            constraint.inc(get_row_index(cmi) + 1, v);
     }
-}
-
-ShannonProofSimplifier::~ShannonProofSimplifier()
-{
-    if (lp)
-        glp_delete_prob(lp);
 }
 
 ShannonProofSimplifier::operator SimplifiedShannonProof() const
 {
-    if (!lp)
+    if (coin_infinity == 0.0)
         return SimplifiedShannonProof();
 
     SimplifiedShannonProof proof;
     proof.initialized = true;
 
-    proof.variables.resize(num_rows);
+    proof.variables.resize(coin_rowub.size());
     for (auto [t, i] : cmi_indices)
-        proof.variables[i - 1] = ExtendedShannonVar{t, &random_var_names};
+        proof.variables[i] = ExtendedShannonVar{t, &random_var_names};
 
-    proof.regular_constraints.resize(num_rows + num_cols);
+    proof.regular_constraints.resize(coin_rowub.size() + coin_colub.size());
     for (auto [t, i] : cmi_indices)
-        proof.regular_constraints[i - 1] = NonNegativityOrOtherRule<Rule>(
+        proof.regular_constraints[i] = NonNegativityOrOtherRule<Rule>(
             NonNegativityOrOtherRule<Rule>::Parent(std::in_place_index_t<0>(), cmi_indices.at(t)));
     for (auto [r, i] : rule_indices)
-        proof.regular_constraints[i + num_rows - 1] = NonNegativityOrOtherRule<Rule>(
+        proof.regular_constraints[i + coin_rowub.size()] = NonNegativityOrOtherRule<Rule>(
             NonNegativityOrOtherRule<Rule>::Parent(std::in_place_index_t<1>(), r));
 
+    if (orig_proof.dual_solution.get(0) != 0.0)
+        proof.dual_solution.inc(0, orig_proof.dual_solution.get(0));
     for (auto [t, v] : cmi_coefficients)
-        proof.dual_solution.inc(cmi_indices.at(t), v);
-
+        proof.dual_solution.inc(cmi_indices.at(t) + 1, v);
     for (auto [r, v] : rule_coefficients)
-        proof.dual_solution.inc(rule_indices.at(r) + num_rows, v);
+        proof.dual_solution.inc(rule_indices.at(r) + coin_rowub.size() + 1, v);
 
     for (int i = 0; i < orig_proof.cmi_constraints.size(); ++i)
     {
@@ -1008,38 +1021,6 @@ ShannonProofSimplifier::operator SimplifiedShannonProof() const
     proof.objective = objective;
 
     return proof;
-}
-
-int ShannonProofSimplifier::get_row_index(CmiTriplet t)
-{
-    if (t[0] > t[1])
-        std::swap(t[0], t[1]);
-
-    auto pair = cmi_indices.insert(std::make_pair(t, num_rows + 1));
-    if (pair.second)
-    {
-        glp_add_rows(lp, 1);
-        glp_set_row_bnds(lp, ++num_rows, GLP_UP, NAN, 0.0);
-    }
-    return pair.first->second;
-}
-
-std::pair<int, bool> ShannonProofSimplifier::check_add_rule_idx(const Rule& r)
-{
-    auto pair = rule_indices.insert(std::make_pair(r, num_cols + 1));
-    if (pair.second)
-        add_cols(r.is_equality());
-    return std::make_pair(pair.first->second, pair.second);
-}
-
-int ShannonProofSimplifier::add_cols(bool eq)
-{
-    glp_add_cols(lp, eq ? 2 : 1);
-    glp_set_col_bnds(lp, ++num_cols, GLP_LO, 0.0, NAN);
-    int idx = num_cols;
-    if (eq)
-        glp_set_col_bnds(lp, ++num_cols, GLP_UP, NAN, 0.0);
-    return idx;
 }
 
 std::ostream& operator<<(std::ostream& out, const ExtendedShannonVar& t)

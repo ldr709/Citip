@@ -36,9 +36,7 @@ try
     ShannonTypeProblem prob(out);
     bool success = true;
     for (int i = 0; i < out.inquiries.size(); ++i) {
-        //ShannonTypeProof proof = prob.prove(inquiry);
-        SimplifiedShannonProof proof = prob.prove(out.inquiries[i], out.cmi_inquiries[i]).simplify();
-        // TODO: try LinearTypeProof
+        ShannonTypeProof proof = prob.prove(out.inquiries[i], out.cmi_inquiries[i]);
         if (proof)
             std::cout << proof << '\n';
         else
@@ -46,6 +44,9 @@ try
             success = false;
             break;
         }
+
+        SimplifiedShannonProof simplified_proof = proof.simplify();
+        std::cout << simplified_proof << '\n';
     }
 
     if (success) {

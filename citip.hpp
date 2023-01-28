@@ -176,11 +176,11 @@ std::ostream& operator<<(std::ostream& out, const LinearProof<Var, Rule>& proof)
     {
         print_coeff(out, dual, false);
         if (i == 0)
-            out << "(1 == 1)\n";
+            out << "(0 >= -1)\n";
         else if (i <= proof.regular_constraints.size())
         {
             out << "(";
-            proof.regular_constraints[i - 1].print(out, proof.variables.data() - 1);
+            proof.regular_constraints[i - 1].print(out, proof.variables.data());
             out << ")\n";
         }
         else

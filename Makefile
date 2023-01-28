@@ -6,7 +6,7 @@ CXXFLAGS = -std=c++20 -O2 -ggdb -I. -I$(BUILDDIR)
 all: prepare Citip
 
 Citip: $(OBJS)
-	g++ -o $@ $^ -lglpk
+	g++ -o $@ $^ -lOsiClp -lClpSolver -lClp -lcholmod -lamd -lcoinasl -lOsi -lCoinUtils -lbz2 -lz -lglpk -llapack -lblas -lm
 
 $(BUILDDIR)/%.o: %.cpp Makefile
 	$(CXX) -o $@ -c $< $(CPPFLAGS) $(CXXFLAGS)
