@@ -496,7 +496,7 @@ LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_r
     // the original check was for the solution (primal variable values)
     // rather than objective value, but let's do it simpler for now (if
     // an optimum is found, it should be zero anyway):
-    if (si->getObjValue() >= -I.get(0))
+    if (si->getObjValue() + I.get(0) + eps >= 0.0)
     {
         LinearProof proof;
         proof.initialized = true;
