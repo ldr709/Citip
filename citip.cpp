@@ -542,7 +542,6 @@ LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_r
                 row_type = -1;
             if (coin.rowub.empty() || coin.rowub[i] == coin.infinity)
             {
-                assert(0);
                 assert(row_type == 0);
                 row_type = 1;
             }
