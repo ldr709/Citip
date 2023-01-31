@@ -717,9 +717,9 @@ SimplifiedShannonProof ShannonTypeProof::simplify() const
 // I(a;b|c,z) = I(a;b,c|c,z) (redundancy and trivial rule, combined with MI chain rule)
 
 const double information_cost                    = 1.0;
-const double conditional_information_cost        = 1.5;
-const double mutual_information_cost             = 2.0;
-const double conditional_mutual_information_cost = 3.0;
+const double conditional_information_cost        = 1.25;
+const double mutual_information_cost             = 1.5;
+const double conditional_mutual_information_cost = 1.5;
 
 // Cost of using the bound I(a;b|c) >= 0 where t == (a, b, c).
 double ShannonProofSimplifier::cmi_complexity_cost(CmiTriplet t) const
@@ -763,14 +763,14 @@ double ExtendedShannonRule::complexity_cost() const
 
     case MUTUAL_CHAIN:
         // I(a;c|z) + I(a;b|c,z) = I(a;b,c|z)
-        return conditional_mutual_information_cost + 1.0;
+        return conditional_mutual_information_cost;
 
     case MONOTONE:
         // I(a,b|z) >= I(a|c,z)
         if (b == 0 || c == 0)
-            return 0.6;
+            return information_cost;
         else
-            return 1.0;
+            return information_cost;
 
     default:
 #ifdef __GNUC__
@@ -985,7 +985,8 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
     //parm.meth = GLP_PRIMAL;
 
     std::cout << "Setting OsiDoDualInInitial: " << si->setHintParam(OsiDoDualInInitial, false, OsiHintDo) << '\n';
-    //std::cout << "Setting OsiDualTolerance: " << si->setDblParam(OsiDualTolerance, 0.01) << '\n';
+    std::cout << "Setting OsiPrimalTolerance: " << si->setDblParam(OsiPrimalTolerance, 1e-9) << '\n';
+    //std::cout << "Setting OsiDualTolerance: " << si->setDblParam(OsiDualTolerance, 1e-9) << '\n';
     si->initialSolve();
 
     if (!si->isProvenOptimal()) {
@@ -1068,8 +1069,11 @@ ShannonProofSimplifier::operator SimplifiedShannonProof() const
     return proof;
 }
 
-std::ostream& operator<<(std::ostream& out, const ExtendedShannonVar& t)
+std::ostream& operator<<(std::ostream& out, ExtendedShannonVar t)
 {
+    if (t[0] > t[1])
+        std::swap(t[0], t[1]);
+
     out << "I(";
     print_var_subset(out, t[0], *t.random_var_names);
 

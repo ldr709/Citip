@@ -326,7 +326,7 @@ struct ShannonRule : public CmiTriplet {
 struct ExtendedShannonVar : public CmiTriplet {
     const std::vector<std::string>* random_var_names = NULL;
 
-    friend std::ostream& operator<<(std::ostream&, const ExtendedShannonVar&);
+    friend std::ostream& operator<<(std::ostream&, ExtendedShannonVar);
 };
 
 // Linear (in)equalities, other than I(a;b|z) >= 0.
