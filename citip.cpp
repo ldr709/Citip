@@ -4,10 +4,8 @@
 #include <stdexcept>    // runtime_error
 #include <iostream>
 
-#include <glpk.h>
 #include <coin/OsiClpSolverInterface.hpp>
 #include <coin/CoinPackedMatrix.hpp>
-#include <coin/CoinPackedVector.hpp>
 
 #include "citip.hpp"
 #include "parser.hxx"
@@ -18,6 +16,58 @@ using std::move;
 using util::sprint_all;
 
 static constexpr double eps = 1e-5;
+
+
+void CoinOsiProblem::setup(OsiSolverInterface& solver)
+{
+    infinity = solver.getInfinity();
+}
+
+void CoinOsiProblem::load_problem_into_solver(OsiSolverInterface& solver)
+{
+    const double* p_collb = collb.empty() ? nullptr : collb.data();
+    const double* p_colub = colub.empty() ? nullptr : colub.data();
+    const double* p_rowlb = rowlb.empty() ? nullptr : rowlb.data();
+    const double* p_rowub = rowub.empty() ? nullptr : rowub.data();
+    const double* p_obj   = obj.empty() ? nullptr : obj.data();
+
+    solver.loadProblem(constraints, p_collb, p_colub, p_obj, p_rowlb, p_rowub);
+}
+
+void CoinOsiProblem::append_with_default(std::vector<double>& vec, int size, double val, double def)
+{
+    if (val != def)
+    {
+        //std::cout << "Adding index " << (size - 1) << '\n';
+        vec.resize(size, def);
+        vec.back() = val;
+    }
+    else if (!vec.empty())
+        vec.resize(size, def);
+}
+
+int CoinOsiProblem::add_row(double lb, double ub, int count, int* indices, double* values)
+{
+    int idx = num_rows++;
+
+    constraints.appendRow(count, indices, values);
+    append_with_default(rowlb, num_rows, lb, -infinity);
+    append_with_default(rowub, num_rows, ub, infinity);
+
+    return idx;
+}
+
+int CoinOsiProblem::add_col(double lb, double ub, double obj_, int count, int* indices, double* values)
+{
+    int idx = num_cols++;
+
+    constraints.appendCol(count, indices, values);
+    append_with_default(collb, num_cols, lb, -infinity);
+    append_with_default(colub, num_cols, ub, infinity);
+    append_with_default(obj, num_cols, obj_, 0.0);
+
+    return idx;
+}
 
 
 static void check_num_vars(int num_vars)
@@ -47,20 +97,18 @@ static int skip_bit(int pool, int bit_index)
 }
 
 
-void ShannonTypeProblem::add_elemental_inequalities(glp_prob* lp, int num_vars)
+void ShannonTypeProblem::add_elemental_inequalities(int num_vars)
 {
-    // NOTE: GLPK uses 1-based indices and never uses the 0th element.
-    int indices[5];
-    double values[5];
+    // NOTE: We use 1-based indices for variable numbers, because 0 would correspond to H() = 0 and
+    // so be usless. However, Coin expects 0-based indices, so translation is needed.
+    int indices[4];
+    double values[4];
     int i, a, b;
 
     if (num_vars == 1) {
-        indices[1] = 1;
-        values[1] = 1;
-        int row = glp_add_rows(lp, 1);
-        glp_set_row_bnds(lp, row, GLP_LO, 0.0, NAN);
-        glp_set_mat_row(lp, row, 1, indices, values);
-
+        indices[0] = 0;
+        values[0] = 0;
+        coin.add_row_lb(0.0, 1, indices, values);
         row_to_cmi.emplace_back(CmiTriplet{1,1,1});
         return;
     }
@@ -88,14 +136,11 @@ void ShannonTypeProblem::add_elemental_inequalities(glp_prob* lp, int num_vars)
     // the form H(X_i|X_c)>=0 where c = ~ {i}:
     for (i = 0; i < num_vars; ++i) {
         int c = all ^ (1 << i);
-        indices[1] = all;
-        indices[2] = c;
-        values[1] = +1;
-        values[2] = -1;
-        int row = glp_add_rows(lp, 1);
-        glp_set_row_bnds(lp, row, GLP_LO, 0.0, NAN);
-        glp_set_mat_row(lp, row, 2, indices, values);
-
+        indices[0] = all - 1;
+        indices[1] = c - 1;
+        values[0] = +1;
+        values[1] = -1;
+        int row = coin.add_row_lb(0.0, 2, indices, values);
         row_to_cmi.emplace_back(CmiTriplet{1 << i, 1 << i, c});
     }
 
@@ -107,18 +152,15 @@ void ShannonTypeProblem::add_elemental_inequalities(glp_prob* lp, int num_vars)
             int B = 1 << b;
             for (i = 0; i < sub_dim; ++i) {
                 int K = skip_bit(skip_bit(i, a), b);
-                indices[1] = A|K;
-                indices[2] = B|K;
-                indices[3] = A|B|K;
-                indices[4] = K;
+                indices[0] = (A|K) - 1;
+                indices[1] = (B|K) - 1;
+                indices[2] = (A|B|K) - 1;
+                indices[3] = (K) - 1;
+                values[0] = +1;
                 values[1] = +1;
-                values[2] = +1;
+                values[2] = -1;
                 values[3] = -1;
-                values[4] = -1;
-                int row = glp_add_rows(lp, 1);
-                glp_set_row_bnds(lp, row, GLP_LO, 0.0, NAN);
-                glp_set_mat_row(lp, row, K ? 4 : 3, indices, values);
-
+                int row = coin.add_row_lb(0.0, K ? 4 : 3, indices, values);
                 row_to_cmi.emplace_back(CmiTriplet{A,B,K});
             }
         }
@@ -340,11 +382,10 @@ void ParserOutput::function_of(ast::FunctionOf fo)
 // LinearProblem
 //----------------------------------------
 
-LinearProblem::LinearProblem()
-{
-    lp = glp_create_prob();
-    glp_set_obj_dir(lp, GLP_MIN);
-}
+LinearProblem::LinearProblem() :
+    si(new OsiClpSolverInterface()),
+    coin(*si, false)
+{}
 
 LinearProblem::LinearProblem(int num_cols)
     : LinearProblem()
@@ -352,17 +393,12 @@ LinearProblem::LinearProblem(int num_cols)
     add_columns(num_cols);
 }
 
-LinearProblem::~LinearProblem()
-{
-    glp_delete_prob(lp);
-}
+LinearProblem::~LinearProblem() {}
 
 void LinearProblem::add_columns(int num_cols)
 {
-    glp_add_cols(lp, num_cols);
-    for (int i = 1; i <= num_cols; ++i) {
-        glp_set_col_bnds(lp, i, GLP_LO, 0, NAN);
-    }
+    for (int i = 1; i <= num_cols; ++i)
+        coin.add_col_lb(0.0);
 }
 
 void LinearProblem::add(const SparseVector& v)
@@ -374,16 +410,13 @@ void LinearProblem::add(const SparseVector& v)
     for (auto&& ent : v.entries) {
         if (ent.first == 0)
             continue;
-        indices.push_back(ent.first);
+        indices.push_back(ent.first - 1);
         values.push_back(ent.second);
     }
 
-    int kind = v.is_equality ? GLP_FX : GLP_LO;
-    int row = glp_add_rows(lp, 1);
-    glp_set_row_bnds(lp, row, kind, -v.get(0), NAN);
-    glp_set_mat_row(
-            lp, row, indices.size(),
-            indices.data()-1, values.data()-1);
+    double lb = -v.get(0);
+    double ub = v.is_equality ? lb : coin.infinity;
+    coin.add_row(lb, ub, indices.size(), indices.data(), values.data());
 }
 
 void print_coeff(std::ostream& out, double c, bool first)
@@ -399,7 +432,9 @@ void print_coeff(std::ostream& out, double c, bool first)
         }
     }
 
-    if (c != 1.0)
+    if (first && std::abs(c + 1.0) <= 1e-9)
+        out << '-';
+    else if (std::abs(c - 1.0) > 1e-9)
         out << c << ' ';
 }
 
@@ -423,107 +458,121 @@ LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_r
         return prove_impl(I, num_regular_rules, want_proof);
     }
 
-    glp_smcp parm;
-    glp_init_smcp(&parm);
-    parm.msg_lev = GLP_MSG_ERR;
-    parm.meth = GLP_DUAL;
+    coin.obj.resize(coin.num_cols);
+    for (int i = 1; i <= coin.num_cols; ++i)
+        coin.obj[i - 1] = I.get(i);
 
-    int num_cols = glp_get_num_cols(lp);
-    int num_rows = glp_get_num_rows(lp);
+    coin.load_problem_into_solver(*si);
+    //si->writeLp("debug");
+    si->initialSolve();
 
-    for (int i = 1; i <= num_cols; ++i)
-        glp_set_obj_coef(lp, i, I.get(i));
-
-    int outcome = glp_simplex(lp, &parm);
-    if (outcome != 0) {
-        throw std::runtime_error(sprint_all(
-                    "Error in glp_simplex: ", outcome));
+    if (!si->isProvenOptimal()) {
+        throw std::runtime_error("LinearProblem: Failed to solve LP.");
     }
 
-    int status = glp_get_status(lp);
-    if (status == GLP_OPT) {
-        // the original check was for the solution (primal variable values)
-        // rather than objective value, but let's do it simpler for now (if
-        // an optimum is found, it should be zero anyway):
-        if (glp_get_obj_val(lp) >= -I.get(0))
-        {
-            LinearProof proof;
-            proof.initialized = true;
+    //glp_smcp parm;
+    //glp_init_smcp(&parm);
+    //parm.msg_lev = GLP_MSG_ERR;
+    //parm.meth = GLP_DUAL;
+    //
+    //int outcome = glp_simplex(lp, &parm);
+    //if (outcome != 0) {
+    //    throw std::runtime_error(sprint_all(
+    //                "Error in glp_simplex: ", outcome));
+    //}
+    //
+    //int status = glp_get_status(lp);
+    //if (status == GLP_OPT) {
+    //} else if (status == GLP_UNBND) {
+    //    return LinearProof();
+    //} else {
+    //    // I am not sure about the exact distinction of GLP_NOFEAS, GLP_INFEAS,
+    //    // GLP_UNDEF, so here is a generic error message:
+    //    throw std::runtime_error(sprint_all(
+    //                "no feasible solution (status code ", status, ")"
+    //                ));
+    //}
 
-            if (!want_proof)
-                return proof;
+    // the original check was for the solution (primal variable values)
+    // rather than objective value, but let's do it simpler for now (if
+    // an optimum is found, it should be zero anyway):
+    if (si->getObjValue() >= -I.get(0))
+    {
+        LinearProof proof;
+        proof.initialized = true;
 
-            proof.objective = I;
-            proof.objective.is_equality = false;
-
-            double const_term = glp_get_obj_val(lp) + I.get(0);
-            if (std::abs(const_term) > eps)
-                proof.dual_solution.entries[0] = const_term;
-
-            for (int j = 1; j <= num_cols; ++j)
-            {
-                proof.variables.emplace_back(LinearVariable{j});
-                proof.regular_constraints.emplace_back(NonNegativityRule{j-1}); // (NonNegativityRule<LinearVariable>{ LinearVariable{i} });
-
-                int stat = glp_get_col_stat(lp, j);
-                double coeff = glp_get_col_dual(lp, j);
-                if (stat == GLP_NL && std::abs(coeff) > eps)
-                    proof.dual_solution.entries[j] = coeff;
-            }
-
-            for (int i = 1; i <= num_rows; ++i)
-            {
-                int stat = glp_get_row_stat(lp, i);
-                double coeff = glp_get_row_dual(lp, i);
-                if ((stat == GLP_NL || stat == GLP_NS) && std::abs(coeff) > eps)
-                    proof.dual_solution.entries[i + num_cols] = coeff;
-            }
-
-            std::vector<int> col_idxs;
-            std::vector<double> coeffs;
-            for (int i = num_regular_rules + 1; i <= num_rows; ++i)
-            {
-                int num_nonzero_cols = glp_get_mat_row(lp, i, NULL, NULL);
-                col_idxs.resize(num_nonzero_cols + 1);
-                coeffs.resize(num_nonzero_cols + 1);
-                glp_get_mat_row(lp, i, col_idxs.data(), coeffs.data());
-
-                int row_type = glp_get_row_type(lp, i);
-
-                proof.custom_constraints.emplace_back();
-                auto& constraint = proof.custom_constraints.back();
-                for (int j = 1; j <= num_nonzero_cols; ++j)
-                    constraint.inc(col_idxs[j], row_type == GLP_UP ? -coeffs[j] : coeffs[j]);
-
-                double const_offset = 0.0;
-                if (row_type == GLP_UP)
-                    const_offset = glp_get_row_ub(lp, i);
-                else if (row_type == GLP_LO || row_type == GLP_FX)
-                    const_offset = -glp_get_row_lb(lp, i);
-                if (std::abs(const_offset) > eps)
-                    constraint.entries[0] = const_offset;
-
-                constraint.is_equality = (row_type == GLP_FX);
-            }
-
+        if (!want_proof)
             return proof;
-        }
-        else
-        {
-            // TODO: Counterexample.
-            return LinearProof();
-        }
-    }
 
-    if (status == GLP_UNBND) {
+        proof.objective = I;
+        proof.objective.is_equality = false;
+
+        double const_term = si->getObjValue() + I.get(0);
+        if (std::abs(const_term) > eps)
+            proof.dual_solution.entries[0] = const_term;
+
+        const double* row_price = si->getRowPrice();
+        std::vector<double> col_price(coin.num_cols, 0.0);
+        coin.constraints.transposeTimes(row_price, col_price.data());
+        for (int j = 0; j < coin.num_cols; ++j)
+            col_price[j] = coin.obj[j] - col_price[j];
+
+        for (int j = 1; j <= coin.num_cols; ++j)
+        {
+            proof.variables.emplace_back(LinearVariable{j});
+            proof.regular_constraints.emplace_back(NonNegativityRule{j-1});
+
+            double coeff = col_price[j - 1];
+            if (std::abs(coeff) > eps)
+                proof.dual_solution.entries[j] = coeff;
+        }
+
+        for (int i = 0; i < coin.num_rows; ++i)
+        {
+            double coeff = row_price[i];
+            if (std::abs(coeff) > eps)
+                proof.dual_solution.entries[i + coin.num_cols + 1] = coeff;
+        }
+
+        for (int i = num_regular_rules; i < coin.num_rows; ++i)
+        {
+            auto coin_constraint = coin.constraints.getVector(i);
+            int row_type = 0;
+            if (coin.rowlb.empty() || coin.rowlb[i] == -coin.infinity)
+                row_type = -1;
+            if (coin.rowub.empty() || coin.rowub[i] == coin.infinity)
+            {
+                assert(0);
+                assert(row_type == 0);
+                row_type = 1;
+            }
+
+            proof.custom_constraints.emplace_back();
+            auto& constraint = proof.custom_constraints.back();
+            for (int j = 0; j < coin_constraint.getNumElements(); ++j)
+            {
+                double coeff = coin_constraint.getElements()[j];
+                constraint.inc(coin_constraint.getIndices()[j] + 1, row_type == -1 ? -coeff : coeff);
+            }
+
+            double const_offset = 0.0;
+            if (row_type == -1)
+                const_offset = coin.rowub[i];
+            else
+                const_offset = -coin.rowlb[i];
+            if (std::abs(const_offset) > eps)
+                constraint.entries[0] = const_offset;
+
+            constraint.is_equality = (row_type == 0);
+        }
+
+        return proof;
+    }
+    else
+    {
+        // TODO: Counterexample.
         return LinearProof();
     }
-
-    // I am not sure about the exact distinction of GLP_NOFEAS, GLP_INFEAS,
-    // GLP_UNDEF, so here is a generic error message:
-    throw std::runtime_error(sprint_all(
-                "no feasible solution (status code ", status, ")"
-                ));
 }
 
 
@@ -533,7 +582,7 @@ ShannonTypeProblem::ShannonTypeProblem(std::vector<std::string> random_var_names
     int num_vars = random_var_names.size();
     check_num_vars(num_vars);
     add_columns((1<<num_vars) - 1);
-    add_elemental_inequalities(lp, num_vars);
+    add_elemental_inequalities(num_vars);
 }
 
 ShannonTypeProblem::ShannonTypeProblem(const ParserOutput& out)
@@ -624,6 +673,7 @@ struct ShannonProofSimplifier
     SparseVector objective;
     const ShannonTypeProof& orig_proof;
 
+    operator bool() const { return coin; }
     operator SimplifiedShannonProof() const;
 
     std::map<CmiTriplet, int> cmi_indices; // rows represent conditional mutual informations.
@@ -632,12 +682,7 @@ struct ShannonProofSimplifier
     std::map<Rule, int> rule_indices;
     int add_rule(const Rule& r);
 
-    // Coin problem
-    CoinPackedMatrix coin_constraints;
-    std::vector<double> coin_collb, coin_colub;
-    std::vector<double> coin_rowub;
-    std::vector<double> coin_obj;
-    double coin_infinity = 0.0;
+    CoinOsiProblem coin;
 
     const std::vector<std::string>& random_var_names;
 };
@@ -738,7 +783,7 @@ double ExtendedShannonRule::complexity_cost() const
 
 int ShannonProofSimplifier::add_rule(const Rule& r)
 {
-    auto [it, inserted] = rule_indices.insert(std::make_pair(r, coin_collb.size()));
+    auto [it, inserted] = rule_indices.insert(std::make_pair(r, coin.num_cols));
     int idx = it->second;
     if (!inserted)
         return idx;
@@ -809,15 +854,9 @@ int ShannonProofSimplifier::add_rule(const Rule& r)
         values[count++] = v;
     }
 
-    coin_constraints.appendCol(count, indices, values);
-    coin_collb.push_back(0.0);
-    coin_colub.push_back(coin_infinity);
+    coin.add_col_lb(0.0, 0.0, count, indices, values);
     if (eq)
-    {
-        coin_constraints.appendCol(count, indices, values);
-        coin_collb.push_back(-coin_infinity);
-        coin_colub.push_back(0.0);
-    }
+        coin.add_col_ub(0.0, 0.0, count, indices, values);
 
     return idx;
 }
@@ -827,14 +866,12 @@ int ShannonProofSimplifier::get_row_index(CmiTriplet t)
     if (t[0] > t[1])
         std::swap(t[0], t[1]);
 
-    auto [it, inserted] = cmi_indices.insert(std::make_pair(t, coin_rowub.size()));
+    auto [it, inserted] = cmi_indices.insert(std::make_pair(t, coin.num_rows));
     int idx = it->second;
     if (!inserted)
         return idx;
 
-    coin_constraints.appendRow(0, nullptr, nullptr);
-    coin_rowub.push_back(0.0);
-
+    coin.add_row_ub(0.0);
     return idx;
 }
 
@@ -842,14 +879,13 @@ int ShannonProofSimplifier::get_row_index(CmiTriplet t)
 // L1 norm (weight proportional to use).
 ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proof_) :
     orig_proof(orig_proof_),
-    random_var_names(orig_proof.variables[0].random_var_names),
-    coin_constraints(true, 2.0, 2.0)
+    random_var_names(orig_proof.variables[0].random_var_names)
 {
     if (!orig_proof)
         return;
 
-    OsiSolverInterface* si = new OsiClpSolverInterface();
-    coin_infinity = si->getInfinity();
+    std::unique_ptr<OsiSolverInterface> si(new OsiClpSolverInterface());
+    coin.setup(*si);
 
     int num_vars = random_var_names.size();
     check_num_vars(num_vars);
@@ -897,7 +933,7 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
         {
             const auto& c = orig_proof.cmi_constraints[i - orig_proof.regular_constraints.size() - 1];
             for (auto [cmi, v] : c.entries)
-                coin_rowub[get_row_index(cmi)] -= coeff * v;
+                coin.rowub[get_row_index(cmi)] -= coeff * v;
         }
     }
 
@@ -907,42 +943,47 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
     for (auto [cmi, v] : orig_proof.cmi_objective.entries)
     {
         int row = get_row_index(cmi);
-        coin_rowub[row] += v;
+        coin.rowub[row] += v;
         objective.inc(row + 1, v);
     }
     objective.inc(0, orig_proof.objective.get(0));
 
-    coin_obj.resize(coin_collb.size(), 0.0);
+    coin.obj.resize(coin.num_cols, 0.0);
     double obj_offset = 0.0;
 
     // cols are easy:
     for (auto [r, col] : rule_indices)
     {
         double cost = r.complexity_cost();
-        coin_obj[col] += cost;
+        coin.obj[col] += cost;
         if (r.is_equality())
-            coin_obj[col + 1] -= cost;
+            coin.obj[col + 1] -= cost;
     }
 
     // rows have to be sent through the constraint map to get the objective.
 
-    std::vector<double> row_obj(coin_rowub.size(), 0.0);
+    std::vector<double> row_obj(coin.num_rows, 0.0);
     for (auto [t, row] : cmi_indices)
     {
         double cost = cmi_complexity_cost(t);
         row_obj[row] -= cost;
-        obj_offset += cost * coin_rowub[row];
+        obj_offset += cost * coin.rowub[row];
     }
 
-    std::vector<double> col_obj_from_row_obj(coin_collb.size(), 0.0);
-    coin_constraints.transposeTimes(row_obj.data(), col_obj_from_row_obj.data());
-    for (int i = 0; i < coin_collb.size(); ++i)
-        coin_obj[i] += col_obj_from_row_obj[i];
+    std::vector<double> col_obj_from_row_obj(coin.num_cols, 0.0);
+    coin.constraints.transposeTimes(row_obj.data(), col_obj_from_row_obj.data());
+    for (int i = 0; i < coin.num_cols; ++i)
+        coin.obj[i] += col_obj_from_row_obj[i];
 
-    si->loadProblem(coin_constraints, coin_collb.data(), coin_colub.data(),
-                    coin_obj.data(), nullptr, coin_rowub.data());
+    coin.load_problem_into_solver(*si);
 
     si->writeLp("simplify_debug");
+
+    //glp_smcp parm;
+    //glp_init_smcp(&parm);
+    //parm.msg_lev = GLP_MSG_ALL; //GLP_MSG_ERR;
+    //parm.presolve = GLP_ON;
+    //parm.meth = GLP_PRIMAL;
 
     std::cout << "Setting OsiDoDualInInitial: " << si->setHintParam(OsiDoDualInInitial, false, OsiHintDo) << '\n';
     //std::cout << "Setting OsiDualTolerance: " << si->setDblParam(OsiDualTolerance, 0.01) << '\n';
@@ -955,12 +996,12 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
     std::cout << "Simplified to cost " << si->getObjValue() << '\n';
 
     const double* col_sol = si->getColSolution();
-    std::vector<double> row_sol(coin_rowub.size(), 0.0);
-    coin_constraints.times(col_sol, row_sol.data());
+    std::vector<double> row_sol(coin.num_rows, 0.0);
+    coin.constraints.times(col_sol, row_sol.data());
 
     for (auto [t, row] : cmi_indices)
     {
-        double coeff = coin_rowub[row] - row_sol[row];
+        double coeff = coin.rowub[row] - row_sol[row];
         if (std::abs(coeff) > eps)
             cmi_coefficients[t] = coeff;
     }
@@ -990,22 +1031,22 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
 
 ShannonProofSimplifier::operator SimplifiedShannonProof() const
 {
-    if (coin_infinity == 0.0)
+    if (!*this)
         return SimplifiedShannonProof();
 
     SimplifiedShannonProof proof;
     proof.initialized = true;
 
-    proof.variables.resize(coin_rowub.size());
+    proof.variables.resize(coin.num_rows);
     for (auto [t, i] : cmi_indices)
         proof.variables[i] = ExtendedShannonVar{t, &random_var_names};
 
-    proof.regular_constraints.resize(coin_rowub.size() + coin_colub.size());
+    proof.regular_constraints.resize(coin.num_rows + coin.num_cols);
     for (auto [t, i] : cmi_indices)
         proof.regular_constraints[i] = NonNegativityOrOtherRule<Rule>(
             NonNegativityOrOtherRule<Rule>::Parent(std::in_place_index_t<0>(), cmi_indices.at(t)));
     for (auto [r, i] : rule_indices)
-        proof.regular_constraints[i + coin_rowub.size()] = NonNegativityOrOtherRule<Rule>(
+        proof.regular_constraints[i + coin.num_rows] = NonNegativityOrOtherRule<Rule>(
             NonNegativityOrOtherRule<Rule>::Parent(std::in_place_index_t<1>(), r));
 
     if (orig_proof.dual_solution.get(0) != 0.0)
@@ -1013,7 +1054,7 @@ ShannonProofSimplifier::operator SimplifiedShannonProof() const
     for (auto [t, v] : cmi_coefficients)
         proof.dual_solution.inc(cmi_indices.at(t) + 1, v);
     for (auto [r, v] : rule_coefficients)
-        proof.dual_solution.inc(rule_indices.at(r) + coin_rowub.size() + 1, v);
+        proof.dual_solution.inc(rule_indices.at(r) + coin.num_rows + 1, v);
 
     for (int i = 0; i < orig_proof.cmi_constraints.size(); ++i)
     {

@@ -8,12 +8,63 @@
 # include <array>
 # include <algorithm>
 # include <functional>
+# include <memory>
+
+# include <coin/CoinPackedMatrix.hpp>
 
 # include "parser.hxx"
 
+class OsiSolverInterface;
 
-struct glp_prob;                    // defined in <glpk.h>
+// Coin osi problem, before it's given to a solver.
+struct CoinOsiProblem {
+    CoinPackedMatrix constraints;
+    std::vector<double> collb, colub;
+    std::vector<double> rowlb, rowub;
+    std::vector<double> obj;
+    double infinity = 0.0;
 
+    int num_rows = 0;
+    int num_cols = 0;
+
+    CoinOsiProblem(bool colmajor = true) : constraints(colmajor, 2.0, 2.0) {}
+    CoinOsiProblem(OsiSolverInterface& solver, bool colmajor = true) :
+        CoinOsiProblem(colmajor) { setup(solver); }
+    void setup(OsiSolverInterface& solver);
+
+    void load_problem_into_solver(OsiSolverInterface& solver);
+
+    int add_row_lb(double lb, int count = 0, int* indices = nullptr,
+                   double* values = nullptr)
+    {
+        return add_row(lb, infinity, count, indices, values);
+    }
+    int add_row_ub(double ub, int count = 0, int* indices = nullptr,
+                   double* values = nullptr)
+    {
+        return add_row(-infinity, ub, count, indices, values);
+    }
+    int add_col_lb(double lb, double obj_ = 0.0, int count = 0, int* indices = nullptr,
+                   double* values = nullptr)
+    {
+        return add_col(lb, infinity, obj_, count, indices, values);
+    }
+    int add_col_ub(double ub, double obj_ = 0.0, int count = 0, int* indices = nullptr,
+                   double* values = nullptr)
+    {
+        return add_col(-infinity, ub, obj_, count, indices, values);
+    }
+
+    int add_row(double lb, double ub,
+                int count = 0, int* indices = nullptr, double* values = nullptr);
+    int add_col(double lb, double ub, double obj_ = 0.0,
+                int count = 0, int* indices = nullptr, double* values = nullptr);
+
+    operator bool() const { return infinity != 0.0; }
+
+private:
+    static void append_with_default(std::vector<double>& vec, int size, double val, double def);
+};
 
 template<typename T>
 struct SparseVectorT
@@ -180,7 +231,7 @@ std::ostream& operator<<(std::ostream& out, const LinearProof<Var, Rule>& proof)
         else if (i <= proof.regular_constraints.size())
         {
             out << "(";
-            proof.regular_constraints[i - 1].print(out, proof.variables.data());
+            proof.regular_constraints[i - 1].print(out, proof.variables.data() - 1);
             out << ")\n";
         }
         else
@@ -206,14 +257,10 @@ class LinearProblem
 {
 public:
     LinearProblem();
-    explicit LinearProblem(int num_cols);
     ~LinearProblem();
+    explicit LinearProblem(int num_cols);
 
     void add_columns(int num_cols);
-
-    LinearProblem(const LinearProblem&) = delete;
-    LinearProblem(LinearProblem&& other) : lp(other.lp) { other.lp = NULL; }
-    LinearProblem& operator = (const LinearProblem&) = delete;
 
     // add a constraint C>=0
     void add(const SparseVector&);
@@ -251,7 +298,8 @@ public:
 protected:
     LinearProof<> prove_impl(const SparseVector& I, int num_regular_rules, bool want_proof);
 
-    glp_prob* lp;
+    std::unique_ptr<OsiSolverInterface> si;
+    CoinOsiProblem coin;
 };
 
 typedef std::array<int, 3> CmiTriplet;
@@ -343,7 +391,7 @@ public:
     ShannonTypeProof prove(const SparseVector& I, SparseVectorT<CmiTriplet> cmi_I);
 
 protected:
-    void add_elemental_inequalities(glp_prob* lp, int num_vars);
+    void add_elemental_inequalities(int num_vars);
 
     MatrixT<CmiTriplet> cmi_constraints;
 
