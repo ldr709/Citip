@@ -37,11 +37,13 @@
                                             return yy::parser::token::T_##tok;
 
     #define YY_TXT                  std::string(yytext, yyleng)
+    #define YY_TXT_SKIP1            std::string(yytext + 1, yyleng - 1)
     #define YY_NUM                  std::atof(yytext)
 
     #define INT_TOKEN(tok, val)     YIELD_TOKEN(tok, val, int)
     #define NUM_TOKEN(tok)          YIELD_TOKEN(tok, YY_NUM, double)
     #define STR_TOKEN(tok)          YIELD_TOKEN(tok, YY_TXT, std::string)
+    #define STR_TOKEN_SKIP1(tok)    YIELD_TOKEN(tok, YY_TXT_SKIP1, std::string)
     #define LITERAL                 return yytext[0];
 
     #define YY_USER_ACTION          yylloc->columns(yyleng);
@@ -54,9 +56,15 @@
     yylloc->step();
 %}
 
- /* do not treat 'I' or 'H' as identifiers if followed by '(' */
-I/\(                        LITERAL
-H/\(                        LITERAL
+ /* TODO: Allow numbered scenarios */
+
+ /* Keyword for indistinguishable scenarios */
+
+indist\.                    INT_TOKEN(INDIST, 0)
+
+ /* Distinguish between entropies and random variables by checking for a following '('. */
+I[[:alnum:]_]*/\(           STR_TOKEN_SKIP1(MUTUAL_INFORMATION)
+H[[:alnum:]_]*/\(           STR_TOKEN_SKIP1(ENTROPY)
 
 [[:alpha:]][[:alnum:]_]*    STR_TOKEN(NAME)
 

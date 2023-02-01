@@ -24,7 +24,12 @@ namespace ast
     };
 
     typedef std::vector<std::string>    VarList;
-    typedef std::vector<VarList>        VarCore;
+
+    struct VarCore
+    {
+        std::string scenario;
+        std::vector<VarList> lists;
+    };
 
     struct Quantity
     {
@@ -58,9 +63,16 @@ namespace ast
     typedef VarCore MarkovChain;
 
     struct FunctionOf {
+        std::string scenario;
         VarList function, of;
     };
 
+    // Specifies that each view (a collection of random variables) must be indistinguishable across
+    // all scenarios in the list. If scenarios is empty, this instead counts as every scenario.
+    struct IndistinguishableScenarios {
+        std::vector<std::string> scenarios;
+        std::vector<VarList> views;
+    };
 }
 
 #endif // include-guard

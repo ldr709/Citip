@@ -32,22 +32,31 @@
 
 %token                  END     0   "end of file"
 
+%token <std::string>    MUTUAL_INFORMATION
+%token <std::string>    ENTROPY
 %token <std::string>    NAME
 %token <double>         NUM
 %token <int>            SIGN
                         REL
+%token <int>            INDIST
 
-%type <ast::Relation>               inform_inequ
-%type <ast::VarCore>                mutual_indep
-%type <ast::VarCore>                markov_chain
-%type <ast::FunctionOf>             determ_depen
-%type <ast::Expression>             inform_expr
-%type <ast::Term>                   inform_term
-%type <ast::Quantity>               inform_quant
-%type <ast::Quantity>               entropy
-%type <ast::Quantity>               mutual_inf
-%type <ast::VarList>                var_list
-%type <ast::VarCore>                mut_inf_core;
+%type <ast::Relation>                   inform_inequ
+%type <ast::VarCore>                    mutual_indep
+%type <std::vector<ast::VarList>>       mutual_indep_list
+%type <ast::VarCore>                    markov_chain
+%type <std::vector<ast::VarList>>       markov_chain_list
+%type <ast::FunctionOf>                 determ_depen
+%type <ast::Expression>                 inform_expr
+%type <ast::Term>                       inform_term
+%type <ast::Quantity>                   inform_quant
+%type <ast::Quantity>                   entropy
+%type <ast::Quantity>                   mutual_inf
+%type <ast::VarList>                    var_list
+%type <std::vector<ast::VarList>>       mut_inf_core;
+%type <std::string>                     scenario;
+%type <ast::IndistinguishableScenarios> indist;
+%type <ast::VarList>                    scenario_list;
+%type <std::vector<ast::VarList>>       scenario_var_lists;
 
 %start statement
 
@@ -69,6 +78,7 @@
         virtual void markov_chain(ast::MarkovChain) = 0;
         virtual void mutual_independence(ast::MutualIndependence) = 0;
         virtual void function_of(ast::FunctionOf) = 0;
+        virtual void indist(ast::IndistinguishableScenarios) = 0;
     };
 }
 
@@ -102,23 +112,45 @@ statement    : %empty           { /* allow empty (or pure comment) lines */ }
              | mutual_indep     { cb->mutual_independence(move($1)); }
              | markov_chain     { cb->markov_chain(move($1)); }
              | determ_depen     { cb->function_of(move($1)); }
+             | indist           { cb->indist(move($1)); }
              ;
 
     /* statements */
 
-inform_inequ : inform_expr REL inform_expr       { $$ = {$1, $2, $3}; }
-             ;
+inform_inequ      : inform_expr REL inform_expr                 { $$ = {$1, $2, $3}; }
+                  ;
 
-markov_chain : markov_chain '/' var_list               { $$ = enlist($1, $3); }
-             |     var_list '/' var_list '/' var_list  { $$ = {$1, $3, $5}; }
-             ;
+markov_chain      : markov_chain_list                           { $$ = {"", $1}; }
+                  | scenario ';' markov_chain_list              { $$ = {$1, $3}; }
+                  ;
 
-mutual_indep : mutual_indep '.' var_list         { $$ = enlist($1, $3); }
-             |     var_list '.' var_list         { $$ = {$1, $3}; }
-             ;
+markov_chain_list : markov_chain_list '/' var_list              { $$ = enlist($1, $3); }
+                  | var_list '/' var_list '/' var_list          { $$ = {$1, $3, $5}; }
+                  ;
 
-determ_depen : var_list ':' var_list             { $$ = {$1, $3}; }
-             ;
+mutual_indep      : mutual_indep_list                           { $$ = {"", $1}; }
+                  | scenario ';' mutual_indep_list              { $$ = {$1, $3}; }
+                  ;
+
+mutual_indep_list : mutual_indep_list '.' var_list              { $$ = enlist($1, $3); }
+                  |     var_list '.' var_list                   { $$ = {$1, $3}; }
+                  ;
+
+determ_depen      : var_list ':' var_list                       { $$ = {"", $1, $3}; }
+                  | scenario ';' var_list ':' var_list          { $$ = {$1, $3, $5}; }
+                  ;
+
+indist            : INDIST scenario_list ';' scenario_var_lists { $$ = {$2, $4}; }
+                  | INDIST               ';' scenario_var_lists { $$ = {{}, $3}; }
+                  ;
+
+scenario_list     : scenario_list ',' scenario                  { $$ = enlist($1, $3); }
+                  | scenario ',' scenario                       { $$ = {$1, $3}; }
+                  ;
+
+scenario_var_lists : scenario_var_lists ':' var_list            { $$ = enlist($1, $3); }
+                   | var_list                                   { $$ = {$1}; }
+                   ;
 
     /* building blocks */
 
@@ -136,12 +168,12 @@ inform_quant : entropy                          { $$ = $1; }
              | mutual_inf                       { $$ = $1; }
              ;
 
-entropy      : 'H' '(' var_list              ')'      { $$ = {{$3}}; }
-             | 'H' '(' var_list '|' var_list ')'      { $$ = {{$3}, $5}; }
+entropy      : ENTROPY '(' var_list              ')'      { $$ = {{$1, {$3}}}; }
+             | ENTROPY '(' var_list '|' var_list ')'      { $$ = {{$1, {$3}}, $5}; }
              ;
 
-mutual_inf   : 'I' '(' mut_inf_core              ')'  { $$ = {{$3}}; }
-             | 'I' '(' mut_inf_core '|' var_list ')'  { $$ = {{$3}, $5}; }
+mutual_inf   : MUTUAL_INFORMATION '(' mut_inf_core              ')'  { $$ = {{$1, $3}}; }
+             | MUTUAL_INFORMATION '(' mut_inf_core '|' var_list ')'  { $$ = {{$1, $3}, $5}; }
              ;
 
 mut_inf_core :  mut_inf_core colon var_list     { $$ = enlist($1, $3); }
@@ -155,6 +187,8 @@ colon        : ':'
 var_list     : var_list ',' NAME                { $$ = enlist($1, $3); }
              |              NAME                { $$ = {$1}; }
              ;
+
+scenario     : NAME                             { $$ = $1; }
 
 %%
 

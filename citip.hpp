@@ -325,9 +325,12 @@ protected:
 struct CmiTriplet :
     public std::array<int, 3>
 {
+    int scenario;
+
     CmiTriplet() = default;
-    CmiTriplet(int a, int b, int c) :
-        std::array<int, 3>{a, b, c}
+    CmiTriplet(int a, int b, int c, int scenario_) :
+        std::array<int, 3>{a, b, c},
+        scenario(scenario_)
     {
         auto& t = *this;
         t[0] &= ~t[2];
@@ -339,6 +342,8 @@ struct CmiTriplet :
         if ((t[0] | t[1]) == t[1])
             t[1] = t[0];
     }
+
+    friend auto operator<=>(const CmiTriplet& a, const CmiTriplet& b) = default;
 };
 
 namespace std
@@ -356,6 +361,7 @@ namespace std
 
 struct ShannonVar {
     const std::vector<std::string>& random_var_names;
+    const std::vector<std::string>& scenario_names;
 
     struct PrintVarsOut {
         const ShannonVar& parent;
@@ -364,6 +370,7 @@ struct ShannonVar {
     };
 
     PrintVarsOut print_vars() const { return PrintVarsOut{*this}; }
+    const std::string& scenario() const;
 
     int v;
     friend std::ostream& operator<<(std::ostream&, const ShannonVar&);
@@ -374,7 +381,8 @@ struct ShannonRule : public CmiTriplet {
 };
 
 struct ExtendedShannonVar : public CmiTriplet {
-    const std::vector<std::string>* random_var_names = NULL;
+    const std::vector<std::string>* random_var_names = nullptr;
+    const std::vector<std::string>* scenario_names = nullptr;
 
     friend std::ostream& operator<<(std::ostream&, ExtendedShannonVar);
 };
@@ -396,6 +404,7 @@ struct ExtendedShannonRule
 
     type_enum type;
     std::array<int, 4> subsets;
+    int scenario;
 
     friend auto operator<=>(const ExtendedShannonRule& a, const ExtendedShannonRule& b) = default;
 
@@ -451,18 +460,20 @@ class ShannonTypeProblem
     : public LinearProblem
 {
 public:
-    explicit ShannonTypeProblem(std::vector<std::string> random_var_names_);
+    ShannonTypeProblem(std::vector<std::string> random_var_names_,
+                       std::vector<std::string> scenario_names_);
     ShannonTypeProblem(const ParserOutput&);
 
     void add(const SparseVector&, SparseVectorT<CmiTriplet>);
     ShannonTypeProof prove(const SparseVector& I, SparseVectorT<CmiTriplet> cmi_I);
 
 protected:
-    void add_elemental_inequalities(int num_vars);
+    void add_elemental_inequalities(int num_vars, int num_scenarios);
 
     MatrixT<CmiTriplet> cmi_constraints;
 
     const std::vector<std::string> random_var_names;
+    const std::vector<std::string> scenario_names;
     std::vector<CmiTriplet> row_to_cmi;
 };
 
@@ -471,14 +482,40 @@ class ParserOutput : public ParserCallback
 {
     int get_var_index(const std::string&);
     int get_set_index(const ast::VarList&);     // as in 'set of variables'
-    void add_term(SparseVector&, SparseVectorT<CmiTriplet>&, const ast::Term&, double scale=1);
+    void add_term(SparseVector&, SparseVectorT<CmiTriplet>&, const ast::Term&,
+                  int scenario_wildcard, double scale);
 
     std::map<std::string, int> vars;
+    std::map<std::string, int> scenarios;
+
+    enum statement_type
+    {
+        RELATION = 0,
+        MARKOV_CHAIN,
+        MUTUAL_INDEPENDENCE,
+        FUNCTION_OF,
+        INDISTINGUISHABLE_SCENARIOS,
+    };
+    typedef std::variant<ast::Relation, ast::MarkovChain, ast::MutualIndependence,
+                         ast::FunctionOf, ast::IndistinguishableScenarios> statement;
+    std::vector<statement> statement_list;
 
     void add_relation(SparseVector, SparseVectorT<CmiTriplet>, bool is_inquiry);
+
+    void add_scenario(const std::string&);
+    void add_symbols(const ast::VarList&);
+
+    void process_statement(const statement& s);
+    void process_relation(const ast::Relation&);
+    void process_markov_chain(const ast::MarkovChain&);
+    void process_mutual_independence(const ast::MutualIndependence&);
+    void process_function_of(const ast::FunctionOf&);
+    void process_indist(const ast::IndistinguishableScenarios&);
+
 public:
     // consider this read-only
     std::vector<std::string> var_names;
+    std::vector<std::string> scenario_names;
 
     Matrix inquiries;
     Matrix constraints;
@@ -486,11 +523,14 @@ public:
     MatrixT<CmiTriplet> cmi_constraints;
     MatrixT<CmiTriplet> cmi_inquiries;
 
+    void process();
+
     // parser callback
-    void relation(ast::Relation);
-    void markov_chain(ast::MarkovChain);
-    void mutual_independence(ast::MutualIndependence);
-    void function_of(ast::FunctionOf);
+    virtual void relation(ast::Relation) override;
+    virtual void markov_chain(ast::MarkovChain) override;
+    virtual void mutual_independence(ast::MutualIndependence) override;
+    virtual void function_of(ast::FunctionOf) override;
+    virtual void indist(ast::IndistinguishableScenarios) override;
 };
 
 
