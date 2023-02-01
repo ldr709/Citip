@@ -954,6 +954,7 @@ SimplifiedShannonProof ShannonTypeProof::simplify() const
 // Learning reduces entropy       I(a|z) >= I(a|b,z) (CMI nonneg I(a;b|z) and CMI defn. 3)
 // More variables more entropy    I(a,b|z) >= I(a|z) (CMI nonneg I(b|a,z) and chain rule)
 // (Combined into monotone:)      I(a,b|z) >= I(a|c,z)
+// Monotone mutual information    I(a;b,c|z) >= I(a;b|z) (CMI nonneg I(a;c|b,z) and MI chain rule)
 //
 // Equality:
 // CMI defn. 1                    I(a;b|c,z) = I(a,c|z) + I(b,c|z) - I(a,b,c|z) - I(c|z)
@@ -1020,12 +1021,19 @@ double ExtendedShannonRule::complexity_cost() const
         // I(a;c|z) + I(a;b|c,z) = I(a;b,c|z)
         return conditional_mutual_information_cost;
 
-    case MONOTONE:
+    case MONOTONE_COND:
         // I(a,b|z) >= I(a|c,z)
         if (b == 0 || c == 0)
             return information_cost;
         else
             return information_cost;
+
+    case MONOTONE_MUT:
+        // I(a;b,c|z) >= I(a;b|z)
+        if (z == 0)
+            return mutual_information_cost;
+        else
+            return conditional_mutual_information_cost;
 
     default:
 #ifdef __GNUC__
@@ -1084,10 +1092,16 @@ int ExtendedShannonRule::get_constraint(CmiTriplet triplets[], double values[]) 
         triplets[count] = CmiTriplet{a, b|c, z, scenario};       values[count++] = -1.0;
         break;
 
-    case MONOTONE:
+    case MONOTONE_COND:
         // I(a,b|z) >= I(a|c,z)
         triplets[count] = CmiTriplet{a|b, a|b, z, scenario};     values[count++] =  1.0;
         triplets[count] = CmiTriplet{a, a, c|z, scenario};       values[count++] = -1.0;
+        break;
+
+    case MONOTONE_MUT:
+        // I(a;b,c|z) >= I(a;b|z)
+        triplets[count] = CmiTriplet{a, b|c, z, scenario};     values[count++] =  1.0;
+        triplets[count] = CmiTriplet{a, b, z, scenario};       values[count++] = -1.0;
         break;
 
     default:
@@ -1181,11 +1195,15 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
 
                     if ((a & b) == 0)
                         for (int c : util::disjoint_subsets(z|a, full_set))
-                            add_rule(Rule{Rule::MONOTONE, z, a, b, c, scenario});
+                            add_rule(Rule{Rule::MONOTONE_COND, z, a, b, c, scenario});
+
+                    if ((a | b) != a && (a | b) != b)
+                        for (int c : util::disjoint_subsets(z|b, full_set))
+                            add_rule(Rule{Rule::MONOTONE_MUT, z, a, b, c, scenario});
                 }
 
                 for (int c : util::skip_n(util::disjoint_subsets(z|a, full_set), 1))
-                    add_rule(Rule{Rule::MONOTONE, z, a, 0, c, scenario});
+                    add_rule(Rule{Rule::MONOTONE_COND, z, a, 0, c, scenario});
             }
         }
     }

@@ -397,7 +397,8 @@ struct ExtendedShannonRule
         CHAIN,
         MUTUAL_CHAIN,
 
-        MONOTONE,
+        MONOTONE_COND,
+        MONOTONE_MUT,
     };
 
     type_enum type;
@@ -408,7 +409,7 @@ struct ExtendedShannonRule
 
     bool is_equality() const
     {
-        return type != MONOTONE;
+        return type != MONOTONE_COND && type != MONOTONE_MUT;
     }
 
     int get_constraint(CmiTriplet indices[], double values[]) const;
