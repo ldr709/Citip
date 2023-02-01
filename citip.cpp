@@ -1346,6 +1346,9 @@ OrderedSimplifiedShannonProof SimplifiedShannonProof::order() const
     std::cout << "Reordered to cost " << /*si*/model.getObjValue() << '\n';
 
     OrderedSimplifiedShannonProof output(*this);
+    if (dual_solution.get(0) != 0.0)
+        output.order.push_back(0);
+
     const double* sol = /*si*/model.bestSolution();
 
     std::vector<bool> added(steps, false);
