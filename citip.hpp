@@ -112,13 +112,16 @@ struct LinearVariable {
     friend std::ostream& operator<<(std::ostream&, const LinearVariable&);
 };
 
+void print_coeff(std::ostream& out, double c, bool first);
+
 // Generic rule -- just a variable that has to be nonnegative.
 struct NonNegativityRule {
     int v;
 
     template<typename Var>
-    void print(std::ostream& out, const Var* vars) const
+    void print(std::ostream& out, const Var* vars, double scale = 1.0) const
     {
+        print_coeff(out, scale, true);
         out << vars[v] << " >= 0";
     }
 };
@@ -129,9 +132,9 @@ struct NonNegativityOrOtherRule : public std::variant<NonNegativityRule, Rule> {
     typedef std::variant<NonNegativityRule, Rule> Parent;
 
     template<typename Var>
-    void print(std::ostream& out, const Var* vars) const
+    void print(std::ostream& out, const Var* vars, double scale = 1.0) const
     {
-        return std::visit([&](auto&& rule) { return rule.print(out, vars); }, *this);
+        return std::visit([&](auto&& rule) { return rule.print(out, vars, scale); }, *this);
     }
 };
 
@@ -189,7 +192,8 @@ struct LinearProof
         other.initialized = false;
     }
 
-    inline void print_custom_constraint(std::ostream& out, const SparseVector& constraint) const;
+    inline void print_custom_constraint(std::ostream& out, const SparseVector& constraint,
+                                        double scale = 1.0) const;
 
     operator bool() const { return initialized; }
     bool operator!() const { return !(bool) *this; }
@@ -199,11 +203,9 @@ struct LinearProof
     friend std::ostream& operator<< <Var, Rule>(std::ostream&, const LinearProof<Var, Rule>&);
 };
 
-void print_coeff(std::ostream& out, double c, bool first);
-
 template<typename Var, typename Rule>
 void LinearProof<Var, Rule>::print_custom_constraint(
-    std::ostream& out, const SparseVector& constraint) const
+    std::ostream& out, const SparseVector& constraint, double scale) const
 {
     double constant_offset = 0.0;
     bool first = true;
@@ -211,11 +213,11 @@ void LinearProof<Var, Rule>::print_custom_constraint(
     {
         if (j == 0)
         {
-            constant_offset = coeff;
+            constant_offset = coeff * scale;
             continue;
         }
 
-        print_coeff(out, coeff, first);
+        print_coeff(out, coeff * scale, first);
         first = false;
         out << variables[j - 1];
     }
@@ -251,22 +253,18 @@ std::ostream& operator<<(std::ostream& out, const LinearProof<Var, Rule>& proof)
 template<typename Var, typename Rule>
 void LinearProof<Var, Rule>::print_step(std::ostream& out, int step, double dual_coeff) const
 {
-    // TODO: Probably would be better to distribute this coefficient over the equation.
-    print_coeff(out, dual_coeff, false);
     if (step == 0)
-        out << "(0 >= -1)\n";
+        out << "0 >= " << -dual_coeff << "\n";
     else if (step <= regular_constraints.size())
     {
-        out << "(";
-        regular_constraints[step - 1].print(out, variables.data() - 1);
-        out << ")\n";
+        regular_constraints[step - 1].print(out, variables.data() - 1, dual_coeff);
+        out << '\n';
     }
     else
     {
-        out << "(";
         int j = step - regular_constraints.size() - 1;
-        print_custom_constraint(out, custom_constraints[j]);
-        out << ")\n";
+        print_custom_constraint(out, custom_constraints[j], dual_coeff);
+        out << '\n';
     }
 }
 
@@ -377,7 +375,7 @@ struct ShannonVar {
 };
 
 struct ShannonRule : public CmiTriplet {
-    void print(std::ostream&, const ShannonVar* vars) const;
+    void print(std::ostream&, const ShannonVar* vars, double scale = 1.0) const;
 };
 
 struct ExtendedShannonVar : public CmiTriplet {
@@ -416,7 +414,7 @@ struct ExtendedShannonRule
     int get_constraint(CmiTriplet indices[], double values[]) const;
     double complexity_cost() const;
 
-    void print(std::ostream& out, const ExtendedShannonVar* vars) const;
+    void print(std::ostream& out, const ExtendedShannonVar* vars, double scale = 1.0) const;
 };
 
 struct OrderedSimplifiedShannonProof;

@@ -669,9 +669,9 @@ void print_coeff(std::ostream& out, double c, bool first)
         }
     }
 
-    if (first && std::abs(c + 1.0) <= 1e-9)
+    if (first && std::abs(c + 1.0) <= eps)
         out << '-';
-    else if (std::abs(c - 1.0) > 1e-9)
+    else if (std::abs(c - 1.0) > eps)
         out << c << ' ';
 }
 
@@ -870,9 +870,10 @@ std::ostream& operator<<(std::ostream& out, const ShannonVar& sv)
     return out << 'H' << sv.scenario() << '(' << sv.print_vars() << ')';
 }
 
-void ShannonRule::print(std::ostream& out, const ShannonVar* vars) const
+void ShannonRule::print(std::ostream& out, const ShannonVar* vars, double scale) const
 {
     auto [a, b, z] = CmiTriplet(*this);
+    print_coeff(out, scale, true);
     out << 'H' << vars[1].scenario_names[scenario] << '(' << vars[a].print_vars();
     if (a != b)
         out << "; " << vars[b].print_vars();
@@ -1391,7 +1392,7 @@ std::ostream& operator<<(std::ostream& out, ExtendedShannonVar t)
     return out;
 }
 
-void ExtendedShannonRule::print(std::ostream& out, const ExtendedShannonVar* vars) const
+void ExtendedShannonRule::print(std::ostream& out, const ExtendedShannonVar* vars, double scale) const
 {
     const std::vector<std::string>* random_var_names = vars[1].random_var_names;
     const std::vector<std::string>* scenario_names = vars[1].scenario_names;
@@ -1407,7 +1408,7 @@ void ExtendedShannonRule::print(std::ostream& out, const ExtendedShannonVar* var
 
     for (int i = 0; i < count; ++i)
     {
-        print_coeff(out, values[i], (i == 0));
+        print_coeff(out, scale * values[i], (i == 0));
         print_cmi(triplets[i]);
     }
 
