@@ -109,7 +109,7 @@ void ShannonTypeProblem::add_elemental_inequalities(int num_vars)
 
     if (num_vars == 1) {
         indices[0] = 0;
-        values[0] = 0;
+        values[0] = 1;
         coin.add_row_lb(0.0, 1, indices, values);
         row_to_cmi.emplace_back(CmiTriplet{1,1,1});
         return;
