@@ -3,10 +3,15 @@ OBJS     = $(addprefix $(BUILDDIR)/,main.o parser.o scanner.o citip.o)
 CPPFLAGS = -MMD -MP
 CXXFLAGS = -std=c++20 -O2 -ggdb -I. -I$(BUILDDIR)
 
+# CBC
+ILP_SOLVER_LIBS = -lCbcSolver -lCbc -lpthread -lrt /usr/lib/libnauty.a -lcoinasl -lCgl
+
+LIBS = $(ILP_SOLVER_LIBS) -lOsiClp -lClpSolver -lClp -lcholmod -lamd -lcoinasl -lOsi -lCoinUtils -lbz2 -lz -lglpk -llapack -lblas -lm
+
 all: prepare Citip
 
 Citip: $(OBJS)
-	g++ -o $@ $^ -lOsiClp -lClpSolver -lClp -lcholmod -lamd -lcoinasl -lOsi -lCoinUtils -lbz2 -lz -lglpk -llapack -lblas -lm
+	g++ -o $@ $^ $(LIBS)
 
 $(BUILDDIR)/%.o: %.cpp Makefile
 	$(CXX) -o $@ -c $< $(CPPFLAGS) $(CXXFLAGS)

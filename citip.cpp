@@ -3,9 +3,11 @@
 #include <sstream>      // istringstream
 #include <stdexcept>    // runtime_error
 #include <iostream>
+#include <thread>
 
-#include <coin/OsiClpSolverInterface.hpp>
 #include <coin/CoinPackedMatrix.hpp>
+#include <coin/OsiClpSolverInterface.hpp>
+#include <coin/CbcSolver.hpp>
 
 #include "citip.hpp"
 #include "parser.hxx"
@@ -1130,8 +1132,8 @@ OrderedSimplifiedShannonProof SimplifiedShannonProof::order() const
     if (!*this)
         return OrderedSimplifiedShannonProof();
 
-    std::unique_ptr<OsiSolverInterface> si(new OsiClpSolverInterface());
-    CoinOsiProblem coin(*si, true);
+    OsiClpSolverInterface si;
+    CoinOsiProblem coin(si, true);
 
     std::vector<int> constraint_map;
     MatrixT<CmiTriplet> used_constraints;
@@ -1309,26 +1311,42 @@ OrderedSimplifiedShannonProof SimplifiedShannonProof::order() const
         coin.add_row_ub(1.0, steps - 1, indices.data(), values.data());
     }
 
-    coin.load_problem_into_solver(*si);
-    si->setInteger(integer_vars.data(), integer_vars.size());
+    coin.load_problem_into_solver(si);
+    si.setInteger(integer_vars.data(), integer_vars.size());
 
     // Make sure that the integer variables are counted as binary.
     for (auto v : integer_vars)
-        assert(si->isBinary(v));
+        assert(si.isBinary(v));
 
-    si->writeLp("order_debug");
-    si->writeMps("order_problem");
+    si.writeLp("order_debug");
+    si.writeMps("order_problem");
 
-    si->setHintParam(OsiDoReducePrint);
-    si->branchAndBound();
-    if (!si->isProvenOptimal()) {
+    si.setHintParam(OsiDoReducePrint);
+
+    int threads = std::thread::hardware_concurrency();
+    std::string threads_str = std::to_string(threads);
+
+    // CLP
+    //si->branchAndBound();
+
+    //CbcModel model(si);
+    CbcModel model(si);
+    CbcSolverUsefulData solverData;
+    CbcMain0(model, solverData);
+
+    // For some reason it's faster to save & load the model.
+    const char* argv[] = {"", "-threads", threads_str.c_str(), "-import", "order_problem.mps.gz", "-solve"};
+    CbcMain1(6, argv, model, [](CbcModel *currentSolver, int whereFrom) -> int { return 0; },
+             solverData);
+
+    if (!/*si*/model.isProvenOptimal()) {
         throw std::runtime_error("LinearProblem: Failed to solve LP.");
     }
 
-    std::cout << "Reordered to cost " << si->getObjValue() << '\n';
+    std::cout << "Reordered to cost " << /*si*/model.getObjValue() << '\n';
 
     OrderedSimplifiedShannonProof output(*this);
-    const double* sol = si->getColSolution();
+    const double* sol = /*si*/model.bestSolution();
 
     std::vector<bool> added(steps, false);
     for (int i = 0; i < steps - 1; ++i)
