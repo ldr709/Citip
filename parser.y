@@ -35,6 +35,7 @@
 %token <std::string>    MUTUAL_INFORMATION
 %token <std::string>    ENTROPY
 %token <std::string>    NAME
+%token <std::string>    INT
 %token <double>         NUM
 %token <int>            SIGN
                         REL
@@ -159,8 +160,10 @@ inform_expr  : inform_expr SIGN inform_term     { $$ = enlist($1, $3.flip_sign($
              |                  inform_term     { $$ = {$1}; }
              ;
 
-inform_term  : NUM inform_quant                 { $$ = {$1, $2}; }
+inform_term  : INT inform_quant                 { $$ = {std::stod($1), $2}; }
+             | NUM inform_quant                 { $$ = {$1, $2}; }
              |     inform_quant                 { $$ = { 1, $1}; }
+             | INT                              { $$ = {std::stod($1)}; }
              | NUM                              { $$ = {$1}; }
              ;
 
@@ -189,6 +192,8 @@ var_list     : var_list ',' NAME                { $$ = enlist($1, $3); }
              ;
 
 scenario     : NAME                             { $$ = $1; }
+             | INT                              { $$ = $1; }
+             ;
 
 %%
 

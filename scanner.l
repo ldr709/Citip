@@ -38,10 +38,11 @@
 
     #define YY_TXT                  std::string(yytext, yyleng)
     #define YY_TXT_SKIP1            std::string(yytext + 1, yyleng - 1)
-    #define YY_NUM                  std::atof(yytext)
+    #define YY_NUM                  std::atol(yytext)
+    #define YY_DBL                  std::atof(yytext)
 
     #define INT_TOKEN(tok, val)     YIELD_TOKEN(tok, val, int)
-    #define NUM_TOKEN(tok)          YIELD_TOKEN(tok, YY_NUM, double)
+    #define NUM_TOKEN(tok)          YIELD_TOKEN(tok, YY_DBL, double)
     #define STR_TOKEN(tok)          YIELD_TOKEN(tok, YY_TXT, std::string)
     #define STR_TOKEN_SKIP1(tok)    YIELD_TOKEN(tok, YY_TXT_SKIP1, std::string)
     #define LITERAL                 return yytext[0];
@@ -56,37 +57,35 @@
     yylloc->step();
 %}
 
- /* TODO: Allow numbered scenarios */
-
  /* Keyword for indistinguishable scenarios */
 
-indist\.                    INT_TOKEN(INDIST, 0)
+indist\.                               INT_TOKEN(INDIST, 0)
 
  /* Distinguish between entropies and random variables by checking for a following '('. */
-I[[:alnum:]_]*/\(           STR_TOKEN_SKIP1(MUTUAL_INFORMATION)
-H[[:alnum:]_]*/\(           STR_TOKEN_SKIP1(ENTROPY)
+I[[:alnum:]_]*/\(                      STR_TOKEN_SKIP1(MUTUAL_INFORMATION)
+H[[:alnum:]_]*/\(                      STR_TOKEN_SKIP1(ENTROPY)
 
-[[:alpha:]][[:alnum:]_]*    STR_TOKEN(NAME)
+[[:alnum:]_]*[[:alpha:]][[:alnum:]_]*  STR_TOKEN(NAME)
 
-[[:digit:]]+                NUM_TOKEN(NUM)
-[[:digit:]]*\.[[:digit:]]+  NUM_TOKEN(NUM)
+[[:digit:]]+                           STR_TOKEN(INT) /* Delay parsing in case it's a scenario. */
+[[:digit:]]*\.[[:digit:]]+             NUM_TOKEN(NUM)
 
-\+                          INT_TOKEN(SIGN, ast::SIGN_PLUS)
-\-                          INT_TOKEN(SIGN, ast::SIGN_MINUS)
+\+                                     INT_TOKEN(SIGN, ast::SIGN_PLUS)
+\-                                     INT_TOKEN(SIGN, ast::SIGN_MINUS)
 
-==?                         INT_TOKEN(REL, ast::REL_EQ)
-\<=                         INT_TOKEN(REL, ast::REL_LE)
-\>=                         INT_TOKEN(REL, ast::REL_GE)
+==?                                    INT_TOKEN(REL, ast::REL_EQ)
+\<=                                    INT_TOKEN(REL, ast::REL_LE)
+\>=                                    INT_TOKEN(REL, ast::REL_GE)
 
-#.*                         {/* eat comments */}
-[ \t]                       {/* eat whitespace */}
+#.*                                    {/* eat comments */}
+[ \t]                                  {/* eat whitespace */}
 
-\n                          yylloc->lines(1); LITERAL
+\n                                     yylloc->lines(1); LITERAL
 
-                            /* forward everything else, even invalid
-                             * tokens - making use of bison's automatic
-                             * error messages */
-.                           LITERAL
+                                       /* forward everything else, even invalid
+                                        * tokens - making use of bison's automatic
+                                        * error messages */
+.                                      LITERAL
 
 %%
 
