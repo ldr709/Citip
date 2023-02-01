@@ -15,7 +15,7 @@
 using std::move;
 using util::sprint_all;
 
-static constexpr double eps = 1e-5;
+static constexpr double eps = 3e-4;
 
 
 void CoinOsiProblem::setup(OsiSolverInterface& solver)
@@ -643,9 +643,9 @@ ShannonTypeProof ShannonTypeProblem::prove(const SparseVector& I,
         [&] (const LinearVariable& v) { return ShannonVar{random_var_names, v.id}; },
         [&] (const NonNegativityOrOtherRule<CmiTriplet>& r) -> ShannonRule {
             if (r.index() == 0)
-                return ShannonRule{std::get<0>(r).v, std::get<0>(r).v, 0};
+                return ShannonRule({std::get<0>(r).v, std::get<0>(r).v, 0});
             else
-                return ShannonRule(std::get<1>(r));
+                return ShannonRule((std::get<1>(r)));
         });
     proof.cmi_constraints = cmi_constraints;
     proof.cmi_objective = move(cmi_I);
@@ -715,6 +715,7 @@ SimplifiedShannonProof ShannonTypeProof::simplify() const
 // I(a,a,b;c|z) = I(a,b;c|z) and I(a;b|c,c,z)=I(a;b|c,z) (redundancy)
 // I(a;|z) = 0 (trivial rule)
 // I(a;b|c,z) = I(a;b,c|c,z) (redundancy and trivial rule, combined with MI chain rule)
+// I(a,b;b|z) = I(b;b|z) (mutual information is a subset of all information (special case of CMI defn. 2)
 
 const double information_cost                    = 1.0;
 const double conditional_information_cost        = 1.25;
@@ -780,61 +781,59 @@ double ExtendedShannonRule::complexity_cost() const
     }
 }
 
-int ShannonProofSimplifier::add_rule(const Rule& r)
+// Outputs into triplets[] and values[]. I've tried to avoid using any rule that contains
+// duplicates, but I might have missed some. These arrays much be at least 5 elements long. Returns
+// the size of the constraint
+int ExtendedShannonRule::get_constraint(CmiTriplet triplets[], double values[]) const
 {
-    auto [it, inserted] = rule_indices.insert(std::make_pair(r, coin.num_cols));
-    int idx = it->second;
-    if (!inserted)
-        return idx;
-
-    bool eq = r.is_equality();
-    auto [z, a, b, c] = r.subsets;
+    auto [z, a, b, c] = subsets;
 
     SparseVector constraint;
-    switch (r.type)
+    int count;
+    switch (type)
     {
-    case Rule::CMI_DEF_I:
+    case CMI_DEF_I:
         // I(a;b|c,z) = I(a,c|z) + I(b,c|z) - I(a,b,c|z) - I(c|z)
-        constraint.inc(get_row_index({a, b, c|z}),       1.0);
-        constraint.inc(get_row_index({a|c, a|c, z}),    -1.0);
-        constraint.inc(get_row_index({b|c, b|c, z}),    -1.0);
-        constraint.inc(get_row_index({a|b|c, a|b|c, z}), 1.0);
-        constraint.inc(get_row_index({c, c, z}),         1.0);
+        triplets[count] = CmiTriplet{a, b, c|z};       values[count++] =  1.0;
+        triplets[count] = CmiTriplet{a|c, a|c, z};     values[count++] = -1.0;
+        triplets[count] = CmiTriplet{b|c, b|c, z};     values[count++] = -1.0;
+        triplets[count] = CmiTriplet{a|b|c, a|b|c, z}; values[count++] =  1.0;
+        triplets[count] = CmiTriplet{c, c, z};         values[count++] =  1.0;
         break;
 
-    case Rule::MI_DEF_I:
+    case MI_DEF_I:
         // I(a;b|z) = I(a|z) + I(b|z) - I(a,b|z)
-        constraint.inc(get_row_index({a, b, z}),      1.0);
-        constraint.inc(get_row_index({a, a, z}),     -1.0);
-        constraint.inc(get_row_index({b, b, z}),     -1.0);
-        constraint.inc(get_row_index({a|b, a|b, z}),  1.0);
+        triplets[count] = CmiTriplet{a, b, z};         values[count++] =  1.0;
+        triplets[count] = CmiTriplet{a, a, z};         values[count++] = -1.0;
+        triplets[count] = CmiTriplet{b, b, z};         values[count++] = -1.0;
+        triplets[count] = CmiTriplet{a|b, a|b, z};     values[count++] =  1.0;
         break;
 
-    case Rule::MI_DEF_CI:
+    case MI_DEF_CI:
         // I(a;b|z) = I(a|z) - I(a|b,z)
-        constraint.inc(get_row_index({a, b, z}),   1.0);
-        constraint.inc(get_row_index({a, a, z}),  -1.0);
-        constraint.inc(get_row_index({a, a, b|z}), 1.0);
+        triplets[count] = CmiTriplet{a, b, z};         values[count++] =  1.0;
+        triplets[count] = CmiTriplet{a, a, z};         values[count++] = -1.0;
+        triplets[count] = CmiTriplet{a, a, b|z};       values[count++] =  1.0;
         break;
 
-    case Rule::CHAIN:
+    case CHAIN:
         // I(c|z) + I(a;b|c,z) = I(a,c;b,c|z)
-        constraint.inc(get_row_index({c, c, z}),      1.0);
-        constraint.inc(get_row_index({a, b, c|z}),    1.0);
-        constraint.inc(get_row_index({a|c, b|c, z}), -1.0);
+        triplets[count] = CmiTriplet{c, c, z};         values[count++] =  1.0;
+        triplets[count] = CmiTriplet{a, b, c|z};       values[count++] =  1.0;
+        triplets[count] = CmiTriplet{a|c, b|c, z};     values[count++] = -1.0;
         break;
 
-    case Rule::MUTUAL_CHAIN:
+    case MUTUAL_CHAIN:
         // I(a;c|z) + I(a;b|c,z) = I(a;b,c|z)
-        constraint.inc(get_row_index({a, c, z}),    1.0);
-        constraint.inc(get_row_index({a, b, c|z}),  1.0);
-        constraint.inc(get_row_index({a, b|c, z}), -1.0);
+        triplets[count] = CmiTriplet{a, c, z};         values[count++] =  1.0;
+        triplets[count] = CmiTriplet{a, b, c|z};       values[count++] =  1.0;
+        triplets[count] = CmiTriplet{a, b|c, z};       values[count++] = -1.0;
         break;
 
-    case Rule::MONOTONE:
+    case MONOTONE:
         // I(a,b|z) >= I(a|c,z)
-        constraint.inc(get_row_index({a|b, a|b, z}), 1.0);
-        constraint.inc(get_row_index({a, a, c|z}),  -1.0);
+        triplets[count] = CmiTriplet{a|b, a|b, z};     values[count++] =  1.0;
+        triplets[count] = CmiTriplet{a, a, c|z};       values[count++] = -1.0;
         break;
 
     default:
@@ -844,14 +843,25 @@ int ShannonProofSimplifier::add_rule(const Rule& r)
         return -1;
     }
 
+    return count;
+}
+
+int ShannonProofSimplifier::add_rule(const Rule& r)
+{
+    auto [it, inserted] = rule_indices.insert(std::make_pair(r, coin.num_cols));
+    int idx = it->second;
+    if (!inserted)
+        return idx;
+
+    bool eq = r.is_equality();
+
+
     int indices[5];
+    CmiTriplet triplets[5];
     double values[5];
-    int count = 0;
-    for (auto [i, v] : constraint.entries)
-    {
-        indices[count] = i;
-        values[count++] = v;
-    }
+    int count = r.get_constraint(triplets, values);
+    for (int i = 0; i < count; ++i)
+        indices[i] = get_row_index(triplets[i]);
 
     coin.add_col_lb(0.0, 0.0, count, indices, values);
     if (eq)
@@ -862,9 +872,6 @@ int ShannonProofSimplifier::add_rule(const Rule& r)
 
 int ShannonProofSimplifier::get_row_index(CmiTriplet t)
 {
-    if (t[0] > t[1])
-        std::swap(t[0], t[1]);
-
     auto [it, inserted] = cmi_indices.insert(std::make_pair(t, coin.num_rows));
     int idx = it->second;
     if (!inserted)
@@ -900,7 +907,7 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
                 if (a != b)
                     add_rule(Rule{Rule::MI_DEF_CI, z, a, b, 0});
 
-                if (a < b)
+                if (a < b && (a | b) != b)
                 {
                     add_rule(Rule{Rule::MI_DEF_I, z, a, b, 0});
 
@@ -1102,77 +1109,273 @@ void ExtendedShannonRule::print(std::ostream& out, const ExtendedShannonVar* var
         out << ExtendedShannonVar {t, random_var_names};
     };
 
-    switch (type)
+    CmiTriplet triplets[5];
+    double values[5];
+    int count = get_constraint(triplets, values);
+
+    for (int i = 0; i < count; ++i)
     {
-    case CMI_DEF_I:
-        // I(a;b|c,z) = I(a,c|z) + I(b,c|z) - I(a,b,c|z) - I(c|z)
-        print_cmi({a, b, c|z});
-        out << " - ";
-        print_cmi({a|c, a|c, z});
-        out << " - ";
-        print_cmi({b|c, b|c, z});
-        out << " + ";
-        print_cmi({a|b|c, a|b|c, z});
-        out << " + ";
-        print_cmi({c, c, z});
-        break;
-
-    case MI_DEF_I:
-        // I(a;b|z) = I(a|z) + I(b|z) - I(a,b|z)
-        print_cmi({a, b, z});
-        out << " - ";
-        print_cmi({a, a, z});
-        out << " - ";
-        print_cmi({b, b, z});
-        out << " + ";
-        print_cmi({a|b, a|b, z});
-        break;
-
-    case MI_DEF_CI:
-        // I(a;b|z) = I(a|z) - I(a|b,z)
-        print_cmi({a, b, z});
-        out << " - ";
-        print_cmi({a, a, z});
-        out << " + ";
-        print_cmi({a, a, b|z});
-        break;
-
-    case CHAIN:
-        // I(c|z) + I(a;b|c,z) = I(a,c;b,c|z)
-        print_cmi({c, c, z});
-        out << " + ";
-        print_cmi({a, b, c|z});
-        out << " - ";
-        print_cmi({a|c, b|c, z});
-        break;
-
-    case MUTUAL_CHAIN:
-        // I(a;c|z) + I(a;b|c,z) = I(a;b,c|z)
-        print_cmi({a, c, z});
-        out << " + ";
-        print_cmi({a, b, c|z});
-        out << " - ";
-        print_cmi({a, b|c, z});
-        break;
-
-    case MONOTONE:
-        // I(a,b|z) >= I(a|c,z)
-        print_cmi({a|b, a|b, z});
-        out << " - ";
-        print_cmi({a, a, c|z});
-        break;
-
-    default:
-#ifdef __GNUC__
-        __builtin_unreachable();
-#endif
-        return;
+        print_coeff(out, values[i], (i == 0));
+        print_cmi(triplets[i]);
     }
 
     if (is_equality())
         out << " == 0";
     else
         out << " >= 0";
+}
+
+OrderedSimplifiedShannonProof SimplifiedShannonProof::order() const
+{
+    if (!*this)
+        return OrderedSimplifiedShannonProof();
+
+    std::unique_ptr<OsiSolverInterface> si(new OsiClpSolverInterface());
+    CoinOsiProblem coin(*si, true);
+
+    std::vector<int> constraint_map;
+    MatrixT<CmiTriplet> used_constraints;
+
+    for (auto [i, v] : dual_solution.entries)
+    {
+        assert(v != 0.0);
+
+        // Ignore constant terms.
+        if (i == 0)
+            continue;
+
+        constraint_map.push_back(i);
+        used_constraints.emplace_back();
+
+        if (i <= regular_constraints.size())
+        {
+            CmiTriplet triplets[5];
+            double values[5];
+            int count = std::visit(overload {
+                [&](const NonNegativityRule& r)
+                {
+                    triplets[0] = variables[r.v - 1]; values[0] = 1.0;
+                    return 1;
+                },
+                [&](const ExtendedShannonRule& r)
+                {
+                    return r.get_constraint(triplets, values);
+                }
+            }, regular_constraints[i - 1]);
+
+            for (int i = 0; i < count; ++i)
+                used_constraints.back().inc(triplets[i], v * values[i]);
+        }
+        else
+        {
+            for (auto [j, coeff] : custom_constraints[i - regular_constraints.size() - 1].entries)
+            {
+                if (j == 0 || coeff == 0.0)
+                    // Ignore constant and zero terms.
+                    continue;
+
+                used_constraints.back().inc(variables[j - 1], v * coeff);
+            }
+        }
+    }
+
+    // How big can each partial sum get.
+    std::vector<double> min_partial_sums, max_partial_sums;
+
+    std::map<CmiTriplet, int> used_triplets;
+    for (const auto& constraint : used_constraints)
+    {
+        for (const auto& [t, val] : constraint.entries)
+        {
+            auto [it, inserted] = used_triplets.insert({t, used_triplets.size()});
+
+            double min_v = std::min(val, 0.0);
+            double max_v = std::max(val, 0.0);
+
+            if (inserted)
+            {
+                min_partial_sums.push_back(min_v);
+                max_partial_sums.push_back(max_v);
+            }
+            else
+            {
+                int idx = it->second;
+                min_partial_sums[idx] += min_v;
+                max_partial_sums[idx] += max_v;
+            }
+        }
+    }
+
+    const int steps = used_constraints.size();
+    const int terms = used_triplets.size();
+
+    std::vector<int> integer_vars;
+    std::vector<int> indices;
+    std::vector<double> values;
+
+    // Requirements that the partial sums (defined below) are be correct.
+    const int partial_sum_correctness_start = coin.num_rows;
+    for (int i = 0; i < steps - 1; ++i)
+        for (int j = 0; j < terms; ++j)
+            coin.add_row_fixed(0.0);
+
+    // Requirements for the partial sum nonzero flags (defined below) to be correct.
+    const int nonzero_partial_sum_correctness_start = coin.num_rows;
+    for (int i = 0; i < steps - 1; ++i)
+        for (int j = 0; j < terms; ++j)
+        {
+            coin.add_row_lb(0.0);
+            coin.add_row_ub(0.0);
+        }
+
+    // Variables for the partial sums after each step (except for the last).
+    const int partial_sums_start = coin.num_cols;
+    for (int i = 0; i < steps - 1; ++i)
+    {
+        for (int j = 0; j < terms; ++j)
+        {
+            indices.clear(); values.clear();
+            indices.push_back(partial_sum_correctness_start + i * terms + j);
+            values.push_back(-1.0);
+            if (i < steps - 2)
+            {
+                indices.push_back(partial_sum_correctness_start + (i + 1) * terms + j);
+                values.push_back(1.0);
+            }
+
+            indices.push_back(nonzero_partial_sum_correctness_start + (i * terms + j) * 2);
+            values.push_back(-1.0);
+            indices.push_back(nonzero_partial_sum_correctness_start + (i * terms + j) * 2 + 1);
+            values.push_back(-1.0);
+
+            coin.add_col_free(0.0, indices.size(), indices.data(), values.data());
+        }
+    }
+
+    // Variables for each step and constraint, for whether the constraint is placed at that step.
+    // Don't bother with the last step, as it can be inferred from the rest.
+    const int step_to_constraint_start = coin.num_cols;
+    for (int i = 0; i < steps - 1; ++i)
+    {
+        for (int j = 0; j < steps; ++j)
+        {
+            indices.clear(); values.clear();
+            for (const auto& [t, v] : used_constraints[j].entries)
+            {
+                indices.push_back(partial_sum_correctness_start + i * terms + used_triplets.at(t));
+                values.push_back(v);
+            }
+
+            int col_idx = coin.add_col(0.0, 1.0, 0.0, indices.size(), indices.data(), values.data());
+            integer_vars.push_back(col_idx);
+        }
+    }
+
+    // Variables for each step and term (except for the last), for whether the term is present in
+    // the partial sum after this step. The objective is to minimize these variables.
+    const int nonzero_partial_sums_start = coin.num_cols;
+    for (int i = 0; i < steps - 1; ++i)
+    {
+        for (int j = 0; j < terms; ++j)
+        {
+            indices.clear(); values.clear();
+            indices.push_back(nonzero_partial_sum_correctness_start + (i * terms + j) * 2);
+            values.push_back(max_partial_sums[j]);
+            indices.push_back(nonzero_partial_sum_correctness_start + (i * terms + j) * 2 + 1);
+            values.push_back(min_partial_sums[j]);
+
+            int col_idx = coin.add_col(0.0, 1.0, 1.0, indices.size(), indices.data(), values.data());
+            integer_vars.push_back(col_idx);
+        }
+    }
+
+    // Require that the variables for each step and constraint form a permutation.
+    indices.resize(steps);
+    values.clear();
+    values.resize(steps, 1.0);
+    for (int i = 0; i < steps; ++i)
+    {
+        // Sums within each step
+        if (i < steps - 1)
+        {
+            for (int j = 0; j < steps; ++j)
+                indices[j] = step_to_constraint_start + i * steps + j;
+            coin.add_row_fixed(1.0, steps, indices.data(), values.data());
+        }
+
+        // Sums between steps
+        for (int j = 0; j < steps - 1; ++j)
+            indices[j] = step_to_constraint_start + j * steps + i;
+        coin.add_row_ub(1.0, steps - 1, indices.data(), values.data());
+    }
+
+    coin.load_problem_into_solver(*si);
+    si->setInteger(integer_vars.data(), integer_vars.size());
+
+    // Make sure that the integer variables are counted as binary.
+    for (auto v : integer_vars)
+        assert(si->isBinary(v));
+
+    si->writeLp("order_debug");
+    si->writeMps("order_problem");
+
+    si->setHintParam(OsiDoReducePrint);
+    si->branchAndBound();
+    if (!si->isProvenOptimal()) {
+        throw std::runtime_error("LinearProblem: Failed to solve LP.");
+    }
+
+    std::cout << "Reordered to cost " << si->getObjValue() << '\n';
+
+    OrderedSimplifiedShannonProof output(*this);
+    const double* sol = si->getColSolution();
+
+    std::vector<bool> added(steps, false);
+    for (int i = 0; i < steps - 1; ++i)
+    {
+        for (int j = 0; j < steps; ++j)
+        {
+            if (sol[step_to_constraint_start + i * steps + j] > 0.5)
+            {
+                assert(!added[j]);
+                added[j] = true;
+                output.order.push_back(constraint_map[j]);
+                break;
+            }
+        }
+    }
+
+    // Last step is the one that didn't get used.
+    int j;
+    for (j = 0; j < steps; ++j)
+        if (!added[j])
+        {
+            output.order.push_back(constraint_map[j]);
+            break;
+        }
+
+    for (++j; j < steps; ++j)
+        assert(added[j]);
+
+    return output;
+}
+
+std::ostream& operator<<(std::ostream& out, const OrderedSimplifiedShannonProof& proof)
+{
+    if (!proof)
+    {
+        out << "FALSE";
+        return out;
+    }
+
+    for (int i : proof.order)
+        proof.print_step(out, i, proof.dual_solution.get(i));
+
+    out << "\n => ";
+    proof.print_custom_constraint(out, proof.objective);
+    out << '\n';
+
+    return out;
 }
 
 

@@ -47,6 +47,9 @@ try
 
         SimplifiedShannonProof simplified_proof = proof.simplify();
         std::cout << simplified_proof << '\n';
+
+        OrderedSimplifiedShannonProof ordered_proof = simplified_proof.order();
+        std::cout << ordered_proof << '\n';
     }
 
     if (success) {

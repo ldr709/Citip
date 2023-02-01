@@ -14,6 +14,9 @@
 
 # include "parser.hxx"
 
+// https://www.cppstories.com/2019/02/2lines3featuresoverload.html/
+template<class... Ts> struct overload : Ts... { using Ts::operator()...; };
+
 class OsiSolverInterface;
 
 // Coin osi problem, before it's given to a solver.
@@ -44,6 +47,11 @@ struct CoinOsiProblem {
     {
         return add_row(-infinity, ub, count, indices, values);
     }
+    int add_row_fixed(double rhs, int count = 0, int* indices = nullptr,
+                      double* values = nullptr)
+    {
+        return add_row(rhs, rhs, count, indices, values);
+    }
     int add_col_lb(double lb, double obj_ = 0.0, int count = 0, int* indices = nullptr,
                    double* values = nullptr)
     {
@@ -53,6 +61,11 @@ struct CoinOsiProblem {
                    double* values = nullptr)
     {
         return add_col(-infinity, ub, obj_, count, indices, values);
+    }
+    int add_col_free(double obj_ = 0.0, int count = 0, int* indices = nullptr,
+                     double* values = nullptr)
+    {
+        return add_col(-infinity, infinity, obj_, count, indices, values);
     }
 
     int add_row(double lb, double ub,
@@ -181,6 +194,8 @@ struct LinearProof
     operator bool() const { return initialized; }
     bool operator!() const { return !(bool) *this; }
 
+    inline void print_step(std::ostream& out, int step, double dual_coeff) const;
+
     friend std::ostream& operator<< <Var, Rule>(std::ostream&, const LinearProof<Var, Rule>&);
 };
 
@@ -224,30 +239,35 @@ std::ostream& operator<<(std::ostream& out, const LinearProof<Var, Rule>& proof)
     }
 
     for (const auto& [i, dual] : proof.dual_solution.entries)
-    {
-        print_coeff(out, dual, false);
-        if (i == 0)
-            out << "(0 >= -1)\n";
-        else if (i <= proof.regular_constraints.size())
-        {
-            out << "(";
-            proof.regular_constraints[i - 1].print(out, proof.variables.data() - 1);
-            out << ")\n";
-        }
-        else
-        {
-            out << "(";
-            int j = i - proof.regular_constraints.size() - 1;
-            proof.print_custom_constraint(out, proof.custom_constraints[j]);
-            out << ")\n";
-        }
-    }
+        proof.print_step(out, i, dual);
 
     out << "\n => ";
     proof.print_custom_constraint(out, proof.objective);
     out << '\n';
 
     return out;
+}
+
+template<typename Var, typename Rule>
+void LinearProof<Var, Rule>::print_step(std::ostream& out, int step, double dual_coeff) const
+{
+    // TODO: Probably would be better to distribute this coefficient over the equation.
+    print_coeff(out, dual_coeff, false);
+    if (step == 0)
+        out << "(0 >= -1)\n";
+    else if (step <= regular_constraints.size())
+    {
+        out << "(";
+        regular_constraints[step - 1].print(out, variables.data() - 1);
+        out << ")\n";
+    }
+    else
+    {
+        out << "(";
+        int j = step - regular_constraints.size() - 1;
+        print_custom_constraint(out, custom_constraints[j]);
+        out << ")\n";
+    }
 }
 
 // Lightweight C++ wrapper for a GLPK problem (glp_prob*). This manages a
@@ -302,7 +322,37 @@ protected:
     CoinOsiProblem coin;
 };
 
-typedef std::array<int, 3> CmiTriplet;
+struct CmiTriplet :
+    public std::array<int, 3>
+{
+    CmiTriplet() = default;
+    CmiTriplet(int a, int b, int c) :
+        std::array<int, 3>{a, b, c}
+    {
+        auto& t = *this;
+        t[0] &= ~t[2];
+        t[1] &= ~t[2];
+
+        if (t[0] > t[1])
+            std::swap(t[0], t[1]);
+
+        if ((t[0] | t[1]) == t[1])
+            t[1] = t[0];
+    }
+};
+
+namespace std
+{
+    template<>
+    struct tuple_size<CmiTriplet> : public std::integral_constant<std::size_t, 3> {};
+
+    template<std::size_t I>
+    struct tuple_element<I, CmiTriplet>
+    {
+        static_assert(I < 3);
+        typedef int type;
+    };
+}
 
 struct ShannonVar {
     const std::vector<std::string>& random_var_names;
@@ -354,13 +404,23 @@ struct ExtendedShannonRule
         return type != MONOTONE;
     }
 
+    int get_constraint(CmiTriplet indices[], double values[]) const;
     double complexity_cost() const;
 
     void print(std::ostream& out, const ExtendedShannonVar* vars) const;
 };
 
-typedef LinearProof<ExtendedShannonVar, NonNegativityOrOtherRule<ExtendedShannonRule>>
-    SimplifiedShannonProof;
+struct OrderedSimplifiedShannonProof;
+
+struct SimplifiedShannonProof :
+    public LinearProof<ExtendedShannonVar, NonNegativityOrOtherRule<ExtendedShannonRule>>
+{
+    typedef LinearProof<ExtendedShannonVar, NonNegativityOrOtherRule<ExtendedShannonRule>> Parent;
+    using Parent::Parent;
+
+    OrderedSimplifiedShannonProof order() const;
+};
+
 struct ShannonTypeProof : public LinearProof<ShannonVar, ShannonRule>
 {
     typedef LinearProof<ShannonVar, ShannonRule> Parent;
@@ -371,6 +431,13 @@ struct ShannonTypeProof : public LinearProof<ShannonVar, ShannonRule>
     // Save these in case simplify() is run.
     MatrixT<CmiTriplet> cmi_constraints;
     SparseVectorT<CmiTriplet> cmi_objective;
+};
+
+struct OrderedSimplifiedShannonProof : public SimplifiedShannonProof
+{
+    std::vector<int> order;
+
+    friend std::ostream& operator<<(std::ostream&, const OrderedSimplifiedShannonProof&);
 };
 
 class ParserOutput;
