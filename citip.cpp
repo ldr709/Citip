@@ -1348,7 +1348,7 @@ ShannonProofSimplifier::operator SimplifiedShannonProof() const
     proof.regular_constraints.resize(num_cmi_rows + num_regular_cols);
     for (auto [t, i] : cmi_indices)
         proof.regular_constraints[i] = NonNegativityOrOtherRule<Rule>(
-            NonNegativityOrOtherRule<Rule>::Parent(std::in_place_index_t<0>(), cmi_indices.at(t)));
+            NonNegativityOrOtherRule<Rule>::Parent(std::in_place_index_t<0>(), cmi_indices.at(t) + 1));
     for (auto [r, i] : rule_indices)
         proof.regular_constraints[i + num_cmi_rows] = NonNegativityOrOtherRule<Rule>(
             NonNegativityOrOtherRule<Rule>::Parent(std::in_place_index_t<1>(), r));
