@@ -912,8 +912,6 @@ struct ShannonProofSimplifier
     ShannonProofSimplifier() = delete;
     ShannonProofSimplifier(const ShannonTypeProof&);
 
-    double cmi_complexity_cost(CmiTriplet t) const;
-
     // How much to use each type of (in)equality:
     std::map<CmiTriplet, double> cmi_coefficients;
     std::map<Rule, double> rule_coefficients;
@@ -973,13 +971,14 @@ SimplifiedShannonProof ShannonTypeProof::simplify() const
 // I(a,b;b|z) = I(b;b|z) (mutual information is a subset of all information (special case of CMI defn. 2)
 
 const double information_cost                    = 1.0;
-const double conditional_information_cost        = 1.25;
+const double conditional_information_cost        = 1.1;
 const double mutual_information_cost             = 1.5;
-const double conditional_mutual_information_cost = 1.5;
+const double conditional_mutual_information_cost = 1.6;
 
 // Cost of using the bound I(a;b|c) >= 0 where t == (a, b, c).
-double ShannonProofSimplifier::cmi_complexity_cost(CmiTriplet t) const
+double CmiTriplet::complexity_cost() const
 {
+    const CmiTriplet& t = *this;
     if (t[0] == t[1])
         if (t[2] == 0)
             return information_cost;
@@ -994,53 +993,14 @@ double ShannonProofSimplifier::cmi_complexity_cost(CmiTriplet t) const
 
 double ExtendedShannonRule::complexity_cost() const
 {
-    auto [z, a, b, c] = subsets;
+    CmiTriplet triplets[5];
+    double values[5];
+    int count = get_constraint(triplets, values);
 
-    switch (type)
-    {
-    case CMI_DEF_I:
-        // I(a;b|c,z) = I(a,c|z) + I(b,c|z) - I(a,b,c|z) - I(c|z)
-        return conditional_mutual_information_cost;
-
-    case MI_DEF_I:
-        // I(a;b|z) = I(a|z) + I(b|z) - I(a,b|z)
-        return mutual_information_cost;
-
-    case MI_DEF_CI:
-        // I(a;b|z) = I(a|z) - I(a|b,z)
-        return mutual_information_cost;
-
-    case CHAIN:
-        // I(c|z) + I(a;b|c,z) = I(a,c;b,c|z)
-        if (a == b)
-            return conditional_information_cost;
-        else
-            return conditional_mutual_information_cost;
-
-    case MUTUAL_CHAIN:
-        // I(a;c|z) + I(a;b|c,z) = I(a;b,c|z)
-        return conditional_mutual_information_cost;
-
-    case MONOTONE_COND:
-        // I(a,b|z) >= I(a|c,z)
-        if (b == 0 || c == 0)
-            return information_cost;
-        else
-            return information_cost;
-
-    case MONOTONE_MUT:
-        // I(a;b,c|z) >= I(a;b|z)
-        if (z == 0)
-            return mutual_information_cost;
-        else
-            return conditional_mutual_information_cost;
-
-    default:
-#ifdef __GNUC__
-        __builtin_unreachable();
-#endif
-        return 0.0;
-    }
+    double cost = 0.0;
+    for (int i = 0; i < count; ++i)
+        cost += triplets[i].complexity_cost();
+    return cost;
 }
 
 // Outputs into triplets[] and values[]. I've tried to avoid using any rule that contains
@@ -1224,7 +1184,7 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
         int count = 0;
         double cost = 0.0;
         for (const auto& [cmi, v] : c.entries) {
-            cost += cmi_complexity_cost(cmi);
+            cost += cmi.complexity_cost();
             indices[count] = get_row_index(cmi);
             values[count++] = v;
         }
@@ -1276,7 +1236,7 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
     std::vector<double> row_obj(coin.num_rows, 0.0);
     for (auto [t, row] : cmi_indices)
     {
-        double cost = cmi_complexity_cost(t);
+        double cost = t.complexity_cost();
         row_obj[row] -= cost;
         obj_offset += cost * coin.rowub[row];
     }

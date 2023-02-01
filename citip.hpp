@@ -341,6 +341,8 @@ struct CmiTriplet :
             t[1] = t[0];
     }
 
+    double complexity_cost() const;
+
     friend auto operator<=>(const CmiTriplet& a, const CmiTriplet& b) = default;
 };
 
