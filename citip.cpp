@@ -1461,7 +1461,7 @@ bool ShannonProofSimplifier::simplify(int depth)
     if (!*this)
         return false;
 
-    std::unique_ptr<OsiSolverInterface> si(new OsiClpSolverInterface());
+    std::unique_ptr<OsiClpSolverInterface> si(new OsiClpSolverInterface());
     coin = CoinOsiProblem(*si);
     cmi_indices.clear();
     rule_indices.clear();
@@ -1607,6 +1607,10 @@ bool ShannonProofSimplifier::simplify(int depth)
     rstat[const_row] = 2; // Could be either 2 or 3, because this is a fixed variable.
 
     si->setBasisStatus(cstat.get(), rstat.get());
+
+    si->setLogLevel(3);
+    si->getModelPtr()->setPerturbation(50);
+    //std::cout << si->getModelPtr()->perturbation() << '\n';
 
     std::cout << "Setting OsiDoDualInInitial: " << si->setHintParam(OsiDoDualInInitial, false, OsiHintDo) << '\n';
     std::cout << "Setting OsiPrimalTolerance: " << si->setDblParam(OsiPrimalTolerance, 1e-9) << '\n';
