@@ -961,8 +961,16 @@ SimplifiedShannonProof ShannonTypeProof::simplify(int depth) const
     }
 
     // Iteratively deepen the simplification.
-    for (int d = 1; d <= depth; ++d)
-        while (simplifier.simplify(d));
+    bool changed;
+    do
+    {
+        for (int d = 1; d <= depth; ++d)
+        {
+            changed = simplifier.simplify(d);
+            if (changed)
+                break;
+        }
+    } while (changed);
 
     return simplifier;
 }
