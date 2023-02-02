@@ -12,12 +12,20 @@ using util::quoted;
 using util::line_iterator;
 
 
-int main (int argc, char *argv[])
+int main (int argc, char **argv)
 try
 {
     using namespace std;
 
     vector<string> expr;
+
+    int depth = 1;
+    if (argc > 2 && strcmp(argv[1], "-d") == 0)
+    {
+        depth = std::atoi(argv[2]);
+        argv += 2;
+        argc -= 2;
+    }
 
     bool use_stdin = argc == 1;
 
@@ -45,7 +53,7 @@ try
             break;
         }
 
-        SimplifiedShannonProof simplified_proof = proof.simplify(2);
+        SimplifiedShannonProof simplified_proof = proof.simplify(depth);
         std::cout << simplified_proof << '\n';
 
         OrderedSimplifiedShannonProof ordered_proof = simplified_proof.order();
