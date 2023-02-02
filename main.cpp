@@ -45,7 +45,7 @@ try
             break;
         }
 
-        SimplifiedShannonProof simplified_proof = proof.simplify();
+        SimplifiedShannonProof simplified_proof = proof.simplify(2);
         std::cout << simplified_proof << '\n';
 
         OrderedSimplifiedShannonProof ordered_proof = simplified_proof.order();

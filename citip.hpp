@@ -31,9 +31,9 @@ struct CoinOsiProblem {
     int num_cols = 0;
 
     CoinOsiProblem(bool colmajor = true) : constraints(colmajor, 2.0, 2.0) {}
-    CoinOsiProblem(OsiSolverInterface& solver, bool colmajor = true) :
+    CoinOsiProblem(const OsiSolverInterface& solver, bool colmajor = true) :
         CoinOsiProblem(colmajor) { setup(solver); }
-    void setup(OsiSolverInterface& solver);
+    void setup(const OsiSolverInterface& solver);
 
     void load_problem_into_solver(OsiSolverInterface& solver);
 
@@ -436,7 +436,7 @@ struct ShannonTypeProof : public LinearProof<ShannonVar, ShannonRule>
     typedef LinearProof<ShannonVar, ShannonRule> Parent;
     using Parent::Parent;
 
-    SimplifiedShannonProof simplify() const;
+    SimplifiedShannonProof simplify(int depth) const;
 
     // Save these in case simplify() is run.
     MatrixT<CmiTriplet> cmi_constraints;

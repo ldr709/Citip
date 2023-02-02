@@ -23,7 +23,7 @@ using util::sprint_all;
 static constexpr double eps = 3e-4;
 
 
-void CoinOsiProblem::setup(OsiSolverInterface& solver)
+void CoinOsiProblem::setup(const OsiSolverInterface& solver)
 {
     infinity = solver.getInfinity();
 }
@@ -915,17 +915,25 @@ struct ShannonProofSimplifier
     ShannonProofSimplifier() = delete;
     ShannonProofSimplifier(const ShannonTypeProof&);
 
+    bool simplify(int depth);
+
+    operator bool() const { return orig_proof; }
+    operator SimplifiedShannonProof();
+
+private:
+    void add_all_rules();
+    void add_adjacent_rules(CmiTriplet);
+
+    double custom_rule_complexity_cost(const SparseVectorT<CmiTriplet>&) const;
+
     // How much to use each type of (in)equality:
     std::map<CmiTriplet, double> cmi_coefficients;
     std::map<Rule, double> rule_coefficients;
     std::map<int, double> custom_rule_coefficients;
 
-    Matrix custom_constraints;
-    SparseVector objective;
-    const ShannonTypeProof& orig_proof;
+    double cost;
 
-    operator bool() const { return coin; }
-    operator SimplifiedShannonProof() const;
+    const ShannonTypeProof& orig_proof;
 
     std::map<CmiTriplet, int> cmi_indices; // rows represent conditional mutual informations.
     int get_row_index(CmiTriplet t);
@@ -933,17 +941,29 @@ struct ShannonProofSimplifier
     std::map<Rule, int> rule_indices;
     int add_rule(const Rule& r);
 
-    std::vector<int> custom_constraint_indices;
-
     CoinOsiProblem coin;
 
     const std::vector<std::string>& random_var_names;
     const std::vector<std::string>& scenario_names;
 };
 
-SimplifiedShannonProof ShannonTypeProof::simplify() const
+SimplifiedShannonProof ShannonTypeProof::simplify(int depth) const
 {
-    return ShannonProofSimplifier(*this);
+    ShannonProofSimplifier simplifier(*this);
+
+    if (depth == 0)
+        return simplifier;
+    else if (depth == -1)
+    {
+        simplifier.simplify(depth);
+        return simplifier;
+    }
+
+    // Iteratively deepen the simplification.
+    for (int d = 1; d <= depth; ++d)
+        while (simplifier.simplify(d));
+
+    return simplifier;
 }
 
 // Divide the rules being used into inequalities and equalities. Each rule gets its own cost of use.
@@ -1003,6 +1023,15 @@ double ExtendedShannonRule::complexity_cost() const
     double cost = 0.0;
     for (int i = 0; i < count; ++i)
         cost += triplets[i].complexity_cost();
+    return cost;
+}
+
+
+double ShannonProofSimplifier::custom_rule_complexity_cost(const SparseVectorT<CmiTriplet>& c) const
+{
+    double cost = 0.0;
+    for (const auto& [cmi, v] : c.entries)
+        cost += cmi.complexity_cost();
     return cost;
 }
 
@@ -1079,6 +1108,59 @@ int ExtendedShannonRule::get_constraint(CmiTriplet triplets[], double values[]) 
 
 int ShannonProofSimplifier::add_rule(const Rule& r)
 {
+    // Validate rule.
+    auto [z, a, b, c] = r.subsets;
+    switch (r.type)
+    {
+    case Rule::CMI_DEF_I:
+        // I(a;b|c,z) = I(a,c|z) + I(b,c|z) - I(a,b,c|z) - I(c|z)
+        if (!((a & z) == 0 && (b & z) == 0 && (c & (z | a | b)) == 0 && a > 0 && a < b && (a | b) != b && c > 0))
+            return -1;
+        break;
+
+    case Rule::MI_DEF_I:
+        // I(a;b|z) = I(a|z) + I(b|z) - I(a,b|z)
+        if (!((a & z) == 0 && (b & z) == 0 && a > 0 && a < b && (a | b) != b))
+            return -1;
+        break;
+
+    case Rule::MI_DEF_CI:
+        // I(a;b|z) = I(a|z) - I(a|b,z)
+        if (!((a & z) == 0 && (b & z) == 0 && a > 0 && b > 0 && a != b))
+            return -1;
+        break;
+
+    case Rule::CHAIN:
+        // I(c|z) + I(a;b|c,z) = I(a,c;b,c|z)
+        if (!((a & z) == 0 && (b & z) == 0 && (c & (z | a | b)) == 0 && a > 0 && a <= b && c > 0))
+            return -1;
+        break;
+
+    case Rule::MUTUAL_CHAIN:
+        // I(a;c|z) + I(a;b|c,z) = I(a;b,c|z)
+        if (!((a & z) == 0 && (b & z) == 0 && (c & (z | a | b)) == 0 && a > 0 && b > 0 && c > 0))
+            return -1;
+        break;
+
+    case Rule::MONOTONE_COND:
+        // I(a,b|z) >= I(a|c,z)
+        if (!((a & z) == 0 && (b & z) == 0 && (a & b) == 0 && (c & (z | a)) == 0 && a > 0))
+            return -1;
+        break;
+
+    case Rule::MONOTONE_MUT:
+        // I(a;b,c|z) >= I(a;b|z)
+        if (!((a & z) == 0 && (b & z) == 0 && (c & (z | b)) == 0 && a > 0 && b > 0 && (a | b) != a && (a | b) != b))
+            return -1;
+        break;
+
+    default:
+#ifdef __GNUC__
+        __builtin_unreachable();
+#endif
+        return -1;
+    }
+
     auto [it, inserted] = rule_indices.insert(std::make_pair(r, coin.num_cols));
     int idx = it->second;
     if (!inserted)
@@ -1112,8 +1194,6 @@ int ShannonProofSimplifier::get_row_index(CmiTriplet t)
     return idx;
 }
 
-// Optimize complexity of proof. Note that here L0 norm (weight if rule used) is approximated by
-// L1 norm (weight proportional to use).
 ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proof_) :
     orig_proof(orig_proof_),
     random_var_names(orig_proof.variables[0].random_var_names),
@@ -1122,11 +1202,68 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
     if (!orig_proof)
         return;
 
-    std::unique_ptr<OsiSolverInterface> si(new OsiClpSolverInterface());
-    coin.setup(*si);
+    cost = 0.0;
 
+    // Translate the old proof into CMI notation.
+    SparseVectorT<CmiTriplet> cmi_usage;
+    for (auto [i, coeff] : orig_proof.dual_solution.entries)
+    {
+        if (i == 0 || coeff == 0.0)
+            continue;
+
+        if (i <= orig_proof.regular_constraints.size())
+        {
+            const auto& c = orig_proof.regular_constraints[i - 1];
+            cmi_coefficients[c] = coeff;
+            cmi_usage.inc(c, coeff);
+            cost += coeff * c.complexity_cost();
+        }
+        else
+        {
+            // Use the original CMI representation of the custom rules.
+            int j = i - orig_proof.regular_constraints.size() - 1;
+            custom_rule_coefficients[j] = coeff;
+
+            const auto& c = orig_proof.cmi_constraints[j];
+            for (const auto& [cmi, v] : c.entries)
+                cmi_usage.inc(cmi, coeff * v);
+            cost += std::abs(coeff) * custom_rule_complexity_cost(c);
+        }
+    }
+
+    // Also use the original CMI representation of the objective.
+    for (const auto& [cmi, v] : orig_proof.cmi_objective.entries)
+        cmi_usage.inc(cmi, v);
+
+    // Add rules to convert every CMI into individual entropies.
+    for (const auto& [t, v] : cmi_usage.entries)
+    {
+        Rule r;
+        if (t[0] == t[1])
+            if (t[2] == 0)
+                // Already a single entropy;
+                continue;
+            else
+                // I(a|c) = I(a,c) - I(c)
+                r = Rule{Rule::CHAIN, 0, t[0], t[0], t[2], t.scenario};
+        else
+            if (t[2] == 0)
+                // I(a;b) = I(a) + I(b) - I(a,b)
+                r = Rule{Rule::MI_DEF_I, 0, t[0], t[1], 0, t.scenario};
+            else
+                // I(a;b|c) = I(a,c) + I(b,c) - I(a,b,c) - I(c)
+                r = Rule{Rule::CMI_DEF_I, 0, t[0], t[1], t[2], t.scenario};
+
+        rule_coefficients[r] = -v;
+        cost += std::abs(v) * r.complexity_cost();
+    }
+
+    std::cout << "Simplifying from cost " << cost << '\n';
+}
+
+void ShannonProofSimplifier::add_all_rules()
+{
     int num_vars = random_var_names.size();
-    check_num_vars(num_vars);
     int full_set = (1 << num_vars) - 1;
 
     // Add rules (other than CMI non negativity, which is implicit.)
@@ -1170,12 +1307,201 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
             }
         }
     }
+}
+
+void ShannonProofSimplifier::add_adjacent_rules(CmiTriplet t)
+{
+    int num_vars = random_var_names.size();
+    int full_set = (1 << num_vars) - 1;
+
+    // Handle symmetry of CMI through brute force. (I.e., flip the CMI and try again).
+    for (int flip = 0; flip < 2; ++flip)
+    {
+        // CMI_DEF_I:
+
+        // I(a;b|c,z)
+        for (int z : util::all_subsets(t[2], full_set))
+            add_rule(Rule{Rule::CMI_DEF_I, z, t[0], t[1], t[2] & ~z, t.scenario});
+
+        if (t[0] == t[1])
+        {
+            // I(a,c|z)
+            for (int b : util::disjoint_subsets(t[2], full_set))
+                for (int c : util::all_subsets(t[0] & ~b, full_set))
+                    add_rule(Rule{Rule::CMI_DEF_I, t[2], t[0] & ~c, b, c, t.scenario});
+
+            // I(b,c|z)
+            for (int a : util::disjoint_subsets(t[2], full_set))
+                for (int c : util::all_subsets(t[0] & ~a, full_set))
+                    add_rule(Rule{Rule::CMI_DEF_I, t[2], a, t[0] & ~c, c, t.scenario});
+
+            // I(a,b,c|z)
+            for (int a : util::all_subsets(t[0], full_set))
+                for (int b : util::all_subsets(t[0], full_set))
+                    add_rule(Rule{Rule::CMI_DEF_I, t[2], a, b, t[0] & ~(a|b), t.scenario});
+
+            // I(c|z)
+            for (int a : util::disjoint_subsets(t[0] | t[2], full_set))
+                for (int b : util::disjoint_subsets(t[0] | t[2], full_set))
+                    add_rule(Rule{Rule::CMI_DEF_I, t[2], a, b, t[0], t.scenario});
+            // TODO: ^ add a way to control the quadratic rules like I(c|z).
+        }
+
+        // MI_DEF_I:
+
+        // I(a;b|z)
+        add_rule(Rule{Rule::MI_DEF_I, t[2], t[0], t[1], 0, t.scenario});
+
+        if (t[0] == t[1])
+        {
+            // I(a|z)
+            for (int b : util::disjoint_subsets(t[2], full_set))
+                add_rule(Rule{Rule::MI_DEF_I, t[2], t[0], b, 0, t.scenario});
+
+            // I(b|z)
+            for (int a : util::disjoint_subsets(t[2], full_set))
+                add_rule(Rule{Rule::MI_DEF_I, t[2], a, t[0], 0, t.scenario});
+
+            // I(a,b|z)
+            for (int a : util::all_subsets(t[0], full_set))
+            {
+                for (int b_ : util::all_subsets(a, full_set))
+                {
+                    int b = (t[0] & ~a) | b_;
+                    add_rule(Rule{Rule::MI_DEF_I, t[2], a, b, 0, t.scenario});
+                }
+            }
+        }
+
+        // MI_DEF_CI:
+
+        // I(a;b|z)
+        add_rule(Rule{Rule::MI_DEF_CI, t[2], t[0], t[1], 0, t.scenario});
+
+        if (t[0] == t[1])
+        {
+            // I(a|z)
+            for (int b : util::disjoint_subsets(t[2], full_set))
+                add_rule(Rule{Rule::MI_DEF_CI, t[2], t[0], b, 0, t.scenario});
+
+            // I(a|b,z)
+            for (int b : util::all_subsets(t[2], full_set))
+                add_rule(Rule{Rule::MI_DEF_CI, t[2] & ~b, t[0], b, 0, t.scenario});
+        }
+
+        // CHAIN:
+
+        // I(c|z)
+        if (t[0] == t[1])
+        {
+            for (int a : util::disjoint_subsets(t[0] | t[2], full_set))
+                for (int b : util::disjoint_subsets(t[0] | t[2], full_set))
+                    add_rule(Rule{Rule::CHAIN, t[2], a, b, t[0], t.scenario});
+            // TODO
+        }
+
+        // I(a;b|c,z)
+        for (int z : util::all_subsets(t[2], full_set))
+            add_rule(Rule{Rule::CHAIN, z, t[0], t[1], t[2] & ~z, t.scenario});
+
+        // I(a,c;b,c|z)
+        for (int c : util::all_subsets(t[0] & t[1], full_set))
+            add_rule(Rule{Rule::CHAIN, t[2], t[0] & ~c, t[1] & ~c, c, t.scenario});
+
+        // MUTUAL_CHAIN:
+
+        // I(a;c|z)
+        for (int b : util::disjoint_subsets(t[1] | t[2], full_set))
+            add_rule(Rule{Rule::MUTUAL_CHAIN, t[2], t[0], b, t[1], t.scenario});
+
+        // I(a;b|c,z)
+        for (int z : util::all_subsets(t[2], full_set))
+            add_rule(Rule{Rule::MUTUAL_CHAIN, z, t[0], t[1], t[2] & ~z, t.scenario});
+
+        // I(a;b,c|z)
+        for (int c : util::all_subsets(t[1] & ~t[0], full_set))
+            add_rule(Rule{Rule::MUTUAL_CHAIN, t[2], t[0], t[1] & ~c, c, t.scenario});
+
+        // MONOTONE_COND:
+
+        if (t[0] == t[1])
+        {
+            // I(a,b|z)
+            for (int a : util::all_subsets(t[0], full_set))
+                for (int c : util::disjoint_subsets(t[2] | a, full_set))
+                    add_rule(Rule{Rule::MONOTONE_COND, t[2], a, t[0] & ~a, c, t.scenario});
+
+            // I(a|c,z)
+            for (int z : util::all_subsets(t[2], full_set))
+                for (int b : util::disjoint_subsets(t[0] | z, full_set))
+                    add_rule(Rule{Rule::MONOTONE_COND, z, t[0], b, t[2] & ~z, t.scenario});
+        }
+
+        // MONOTONE_MUT:
+
+        // I(a;b,c|z)
+        for (int c : util::all_subsets(t[1], full_set))
+            add_rule(Rule{Rule::MONOTONE_MUT, t[2], t[0], t[1] & ~c, c, t.scenario});
+
+        // I(a;b|z)
+        for (int c : util::disjoint_subsets(t[1] | t[2], full_set))
+            add_rule(Rule{Rule::MONOTONE_MUT, t[2], t[0], t[1], c, t.scenario});
+
+        // Repeat with symmetrical CMI, if necessary.
+        if (t[0] == t[1])
+            break;
+        std::swap(t[0], t[1]);
+    }
+}
+
+// Optimize complexity of proof. Note that here L0 norm (weight if rule used) is approximated by
+// L1 norm (weight proportional to use).
+bool ShannonProofSimplifier::simplify(int depth)
+{
+    if (!*this)
+        return false;
+
+    std::unique_ptr<OsiSolverInterface> si(new OsiClpSolverInterface());
+    coin = CoinOsiProblem(*si);
+    cmi_indices.clear();
+    rule_indices.clear();
+
+    if (depth == -1)
+        add_all_rules();
+    else
+    {
+        // Add all existing rules.
+        for (const auto& [cmi, v] : cmi_coefficients)
+            get_row_index(cmi);
+        for (const auto& [r, v] : rule_coefficients)
+            add_rule(r);
+
+        // Include all custom constraints, not just those that were used.
+        for (int i = 0; i < orig_proof.cmi_constraints.size(); ++i)
+        {
+            const auto& c = orig_proof.cmi_constraints[i];
+            for (const auto& [cmi, v] : c.entries)
+                get_row_index(cmi);
+        }
+
+        // And include the objective of course.
+        for (auto [cmi, v] : orig_proof.cmi_objective.entries)
+            get_row_index(cmi);
+
+        for (int i = 0; i < depth; ++i)
+        {
+            std::map<CmiTriplet, int> cmi_snapshot = cmi_indices;
+            for (auto [cmi, v] : cmi_snapshot)
+                add_adjacent_rules(cmi);
+        }
+    }
 
     // Constraint to force the constant term to match the original proof.
     std::vector<int> const_indices;
     std::vector<double> const_values;
 
     // Include columns for the custom constraints.
+    std::vector<int> custom_constraint_indices;
     for (int i = 0; i < orig_proof.cmi_constraints.size(); ++i)
     {
         const auto& c = orig_proof.cmi_constraints[i];
@@ -1185,13 +1511,12 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
         std::vector<int> indices(c.entries.size());
         std::vector<double> values(c.entries.size());
         int count = 0;
-        double cost = 0.0;
         for (const auto& [cmi, v] : c.entries) {
-            cost += cmi.complexity_cost();
             indices[count] = get_row_index(cmi);
             values[count++] = v;
         }
 
+        double cost = custom_rule_complexity_cost(c);
         custom_constraint_indices.push_back(
             coin.add_col_lb(0.0, cost, count, indices.data(), values.data()));
         if (eq)
@@ -1211,16 +1536,14 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
     }
 
     double const_coeff_value = orig_proof.objective.get(0) - orig_proof.dual_solution.get(0);
-    coin.add_row_fixed(const_coeff_value, const_indices.size(), const_indices.data(), const_values.data());
+    int const_row = coin.add_row_fixed(const_coeff_value, const_indices.size(), const_indices.data(), const_values.data());
 
     // Use the original CMI representation of the objective.
     for (auto [cmi, v] : orig_proof.cmi_objective.entries)
     {
         int row = get_row_index(cmi);
         coin.rowub[row] += v;
-        objective.inc(row + 1, v);
     }
-    objective.inc(0, orig_proof.objective.get(0));
 
     coin.obj.resize(coin.num_cols, 0.0);
     double obj_offset = 0.0;
@@ -1250,14 +1573,40 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
         coin.obj[i] += col_obj_from_row_obj[i];
 
     coin.load_problem_into_solver(*si);
+    //si->writeLp("simplify_debug");
 
-    si->writeLp("simplify_debug");
+    // Set the initial solution status based on the old proof.
 
-    //glp_smcp parm;
-    //glp_init_smcp(&parm);
-    //parm.msg_lev = GLP_MSG_ALL; //GLP_MSG_ERR;
-    //parm.presolve = GLP_ON;
-    //parm.meth = GLP_PRIMAL;
+    auto cstat = std::make_unique<int[]>(coin.num_cols);
+    auto rstat = std::make_unique<int[]>(coin.num_rows);
+    for (auto [r, i] : rule_indices)
+    {
+        double v = rule_coefficients.contains(r) ? rule_coefficients.at(r) : 0.0;
+        cstat[i] = v > 0.0 ? 1 : 3;
+        if (r.is_equality())
+            cstat[i + 1] = v < 0.0 ? 1 : 2;
+    }
+
+    for (int i = 0; i < orig_proof.cmi_constraints.size(); ++i)
+    {
+        const auto& orig_constraint = orig_proof.cmi_constraints[i];
+        int j = custom_constraint_indices.at(i);
+        double v = custom_rule_coefficients.contains(i) ? custom_rule_coefficients.at(i) : 0.0;
+
+        cstat[j] = v > 0.0 ? 1 : 3;
+        if (orig_constraint.is_equality)
+            cstat[j + 1] = v < 0.0 ? 1 : 2;
+    }
+
+    for (auto [t, i] : cmi_indices)
+    {
+        double v = cmi_coefficients.contains(t) ? cmi_coefficients.at(t) : 0.0;
+        rstat[i] = v > 0.0 ? 1 : 3; // At upper bound, but 2 and 3 are swapped for rows.
+    }
+
+    rstat[const_row] = 2; // Could be either 2 or 3, because this is a fixed variable.
+
+    si->setBasisStatus(cstat.get(), rstat.get());
 
     std::cout << "Setting OsiDoDualInInitial: " << si->setHintParam(OsiDoDualInInitial, false, OsiHintDo) << '\n';
     std::cout << "Setting OsiPrimalTolerance: " << si->setDblParam(OsiPrimalTolerance, 1e-9) << '\n';
@@ -1268,11 +1617,19 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
         throw std::runtime_error("ShannonProofSimplifier: Failed to solve LP.");
     }
 
-    std::cout << "Simplified to cost " << (si->getObjValue() + obj_offset) << '\n';
+    double new_cost = si->getObjValue() + obj_offset;
+    std::cout << "Simplified to cost " << new_cost << '\n';
 
     const double* col_sol = si->getColSolution();
     std::vector<double> row_sol(coin.num_rows, 0.0);
     coin.constraints.times(col_sol, row_sol.data());
+
+    auto old_cmi_coefficients         = std::move(cmi_coefficients);
+    auto old_rule_coefficients        = std::move(rule_coefficients);
+    auto old_custom_rule_coefficients = std::move(custom_rule_coefficients);
+    cmi_coefficients.clear();
+    rule_coefficients.clear();
+    custom_rule_coefficients.clear();
 
     for (auto [t, row] : cmi_indices)
     {
@@ -1293,25 +1650,22 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
 
     for (int i = 0; i < orig_proof.cmi_constraints.size(); ++i)
     {
-        custom_constraints.emplace_back();
         const auto& orig_constraint = orig_proof.cmi_constraints[i];
-        auto& constraint = custom_constraints.back();
-        constraint.is_equality = orig_constraint.is_equality;
-        if (orig_proof.custom_constraints[i].get(0) != 0.0)
-            constraint.inc(0, orig_proof.custom_constraints[i].get(0));
-        for (const auto& [cmi, v] : orig_constraint.entries)
-            constraint.inc(get_row_index(cmi) + 1, v);
-
         double coeff = col_sol[custom_constraint_indices[i]];
-        if (constraint.is_equality)
+        if (orig_constraint.is_equality)
             coeff += col_sol[custom_constraint_indices[i] + 1];
 
         if (std::abs(coeff) > eps)
             custom_rule_coefficients[i] = coeff;
     }
+
+    bool changed = (cost - new_cost > eps);
+    cost = new_cost;
+
+    return changed;
 }
 
-ShannonProofSimplifier::operator SimplifiedShannonProof() const
+ShannonProofSimplifier::operator SimplifiedShannonProof()
 {
     if (!*this)
         return SimplifiedShannonProof();
@@ -1319,32 +1673,56 @@ ShannonProofSimplifier::operator SimplifiedShannonProof() const
     SimplifiedShannonProof proof;
     proof.initialized = true;
 
-    int num_cmi_rows = coin.num_rows - 1;
-    int num_regular_cols = custom_constraint_indices.size() ? custom_constraint_indices[0] : coin.num_cols;
-
-    proof.variables.resize(num_cmi_rows);
-    for (auto [t, i] : cmi_indices)
-        proof.variables[i] = ExtendedShannonVar{t, &random_var_names, &scenario_names};
-
-    proof.regular_constraints.resize(num_cmi_rows + num_regular_cols);
-    for (auto [t, i] : cmi_indices)
-        proof.regular_constraints[i] = NonNegativityOrOtherRule<Rule>(
-            NonNegativityOrOtherRule<Rule>::Parent(std::in_place_index_t<0>(), cmi_indices.at(t) + 1));
-    for (auto [r, i] : rule_indices)
-        proof.regular_constraints[i + num_cmi_rows] = NonNegativityOrOtherRule<Rule>(
-            NonNegativityOrOtherRule<Rule>::Parent(std::in_place_index_t<1>(), r));
+    coin = CoinOsiProblem(OsiClpSolverInterface());
+    cmi_indices.clear();
+    rule_indices.clear();
 
     if (orig_proof.dual_solution.get(0) != 0.0)
         proof.dual_solution.inc(0, orig_proof.dual_solution.get(0));
-    for (auto [t, v] : cmi_coefficients)
-        proof.dual_solution.inc(cmi_indices.at(t) + 1, v);
-    for (auto [r, v] : rule_coefficients)
-        proof.dual_solution.inc(rule_indices.at(r) + num_cmi_rows + 1, v);
-    for (auto [i, v] : custom_rule_coefficients)
-        proof.dual_solution.inc(i + proof.regular_constraints.size() + 1, v);
 
-    proof.custom_constraints = custom_constraints;
-    proof.objective = objective;
+    for (auto [t, v] : cmi_coefficients)
+    {
+        int idx = get_row_index(t);
+        proof.regular_constraints.emplace_back(
+            NonNegativityOrOtherRule<Rule>::Parent(std::in_place_index_t<0>(), idx + 1));
+        proof.dual_solution.inc(idx + 1, v);
+    }
+
+    int n = coin.num_rows;
+    for (auto [r, v] : rule_coefficients)
+    {
+        proof.regular_constraints.emplace_back(
+            NonNegativityOrOtherRule<Rule>::Parent(std::in_place_index_t<1>(), r));
+
+        CmiTriplet triplets[5];
+        double values[5];
+        int count = r.get_constraint(triplets, values);
+        for (int i = 0; i < count; ++i)
+            get_row_index(triplets[i]);
+
+        proof.dual_solution.inc(++n, v);
+    }
+
+    for (auto [i, v] : custom_rule_coefficients)
+    {
+        const auto& orig_constraint = orig_proof.cmi_constraints[i];
+        proof.custom_constraints.emplace_back();
+        auto& constraint = proof.custom_constraints.back();
+        constraint.is_equality = orig_constraint.is_equality;
+        if (orig_proof.custom_constraints[i].get(0) != 0.0)
+            constraint.inc(0, orig_proof.custom_constraints[i].get(0));
+        for (const auto& [cmi, v2] : orig_constraint.entries)
+            constraint.inc(get_row_index(cmi) + 1, v2);
+
+        proof.dual_solution.inc(++n, v);
+    }
+
+    proof.variables.resize(coin.num_rows);
+    for (auto [t, i] : cmi_indices)
+        proof.variables[i] = ExtendedShannonVar{t, &random_var_names, &scenario_names};
+
+    for (auto [cmi, v] : orig_proof.cmi_objective.entries)
+        proof.objective.inc(cmi_indices.at(cmi) + 1, v);
 
     return proof;
 }

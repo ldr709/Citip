@@ -124,6 +124,11 @@ namespace util
         }
     };
 
+    inline disjoint_subsets all_subsets(unsigned int superset, unsigned int universe)
+    {
+        return disjoint_subsets(universe & ~superset, universe);
+    }
+
     static_assert(std::forward_iterator<disjoint_subsets::iterator>);
 
     template<typename Range>
