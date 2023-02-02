@@ -9,6 +9,9 @@
 #include <coin/OsiClpSolverInterface.hpp>
 #include <coin/CbcSolver.hpp>
 
+#include <scip/scip.h>
+#include <scip/scipdefplugins.h>
+
 #include "citip.hpp"
 #include "parser.hxx"
 #include "scanner.hpp"
@@ -1595,30 +1598,87 @@ OrderedSimplifiedShannonProof SimplifiedShannonProof::order() const
     int threads = std::thread::hardware_concurrency();
     std::string threads_str = std::to_string(threads);
 
-    // CLP
-    //si->branchAndBound();
+    bool succeeded = false;
+    double obj;
+    const  double* sol = nullptr;
+    std::unique_ptr<double[]> sol_storage;
+    if (false)
+    {
+        // CLP
+        si.branchAndBound();
+        succeeded = si.isProvenOptimal();
+        obj = si.getObjValue();
+        sol = si.getColSolution();
+    }
+    else if (false)
+    {
+        // CBC
 
-    //CbcModel model(si);
-    CbcModel model(si);
-    CbcSolverUsefulData solverData;
-    CbcMain0(model, solverData);
+        CbcModel model(si);
+        CbcSolverUsefulData solverData;
+        CbcMain0(model, solverData);
 
-    // For some reason it's faster to save & load the model.
-    const char* argv[] = {"", "-threads", threads_str.c_str(), "-import", "order_problem.mps.gz", "-solve"};
-    CbcMain1(6, argv, model, [](CbcModel *currentSolver, int whereFrom) -> int { return 0; },
-             solverData);
+        // For some reason it's faster to save & load the model.
+        const char* argv[] = {"", "-threads", threads_str.c_str(), "-import", "order_problem.mps.gz", "-solve"};
+        CbcMain1(6, argv, model, [](CbcModel *currentSolver, int whereFrom) -> int { return 0; },
+                 solverData);
 
-    if (!/*si*/model.isProvenOptimal()) {
+        succeeded = model.isProvenOptimal();
+        obj = model.getObjValue();
+        sol = model.bestSolution();
+    }
+    else if (true)
+    {
+        // SCIP
+        SCIP* scip_;
+        SCIPcreate(&scip_);
+        auto scip_deleter = [&](SCIP* ptr) { SCIPfree(&ptr); };
+        std::unique_ptr<SCIP, decltype(scip_deleter)> scip(scip_, scip_deleter);
+
+        SCIPincludeDefaultPlugins(scip.get());
+
+        SCIPreadProb(scip.get(), "order_problem.mps.gz", nullptr);
+        if (SCIPgetStage(scip.get()) == SCIP_STAGE_PROBLEM)
+            succeeded = true;
+
+        if (succeeded)
+        {
+            SCIPsolve(scip.get());
+            succeeded = (SCIPgetStage(scip.get()) == SCIP_STAGE_SOLVED);
+        }
+
+        if (succeeded)
+        {
+            SCIP_SOL* scip_sol = SCIPgetBestSol(scip.get());
+            obj = SCIPgetSolOrigObj(scip.get(), scip_sol);
+
+            SCIP_VAR** scip_vars = SCIPgetOrigVars(scip.get());
+            int n_scip_vars = SCIPgetNOrigVars(scip.get());
+            assert(n_scip_vars == coin.num_cols);
+
+            // SCIP mangles the variable order, but sorting should fix this.
+            std::sort(scip_vars, scip_vars + n_scip_vars, [&](SCIP_VAR* a, SCIP_VAR* b) {
+                return strcmp(SCIPvarGetName(a), SCIPvarGetName(b)) < 0;
+            });
+
+            for (int i = 0; i < n_scip_vars; ++i)
+                assert(std::atol(SCIPvarGetName(scip_vars[i]) + 1) == i);
+
+            sol_storage.reset(new double[n_scip_vars]);
+            SCIPgetSolVals(scip.get(), scip_sol, n_scip_vars, scip_vars, sol_storage.get());
+            sol = sol_storage.get();
+        }
+    }
+
+    if (!succeeded) {
         throw std::runtime_error("LinearProblem: Failed to solve LP.");
     }
 
-    std::cout << "Reordered to cost " << /*si*/model.getObjValue() << '\n';
+    std::cout << "Reordered to cost " << obj << '\n';
 
     OrderedSimplifiedShannonProof output(*this);
     if (dual_solution.get(0) != 0.0)
         output.order.push_back(0);
-
-    const double* sol = /*si*/model.bestSolution();
 
     std::vector<bool> added(steps, false);
     for (int i = 0; i < steps - 1; ++i)

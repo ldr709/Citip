@@ -4,7 +4,10 @@ CPPFLAGS = -MMD -MP
 CXXFLAGS = -std=c++20 -O2 -ggdb -I. -I$(BUILDDIR)
 
 # CBC
-ILP_SOLVER_LIBS = -lCbcSolver -lCbc -lpthread -lrt /usr/lib/libnauty.a -lcoinasl -lCgl
+#ILP_SOLVER_LIBS = -lCbcSolver -lCbc -lpthread -lrt /usr/lib/libnauty.a -lcoinasl -lCgl
+
+# SCIP
+ILP_SOLVER_LIBS = -lscip
 
 LIBS = $(ILP_SOLVER_LIBS) -lOsiClp -lClpSolver -lClp -lcholmod -lamd -lcoinasl -lOsi -lCoinUtils -lbz2 -lz -lglpk -llapack -lblas -lm
 
