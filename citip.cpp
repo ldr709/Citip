@@ -923,6 +923,7 @@ struct ShannonProofSimplifier
 private:
     void add_all_rules();
     void add_adjacent_rules(CmiTriplet);
+    void add_adjacent_rules_quadratic(CmiTriplet);
 
     double custom_rule_complexity_cost(const SparseVectorT<CmiTriplet>&) const;
 
@@ -1339,12 +1340,6 @@ void ShannonProofSimplifier::add_adjacent_rules(CmiTriplet t)
             for (int a : util::all_subsets(t[0], full_set))
                 for (int b : util::all_subsets(t[0], full_set))
                     add_rule(Rule{Rule::CMI_DEF_I, t[2], a, b, t[0] & ~(a|b), t.scenario});
-
-            // I(c|z)
-            for (int a : util::disjoint_subsets(t[0] | t[2], full_set))
-                for (int b : util::disjoint_subsets(t[0] | t[2], full_set))
-                    add_rule(Rule{Rule::CMI_DEF_I, t[2], a, b, t[0], t.scenario});
-            // TODO: ^ add a way to control the quadratic rules like I(c|z).
         }
 
         // MI_DEF_I:
@@ -1390,15 +1385,6 @@ void ShannonProofSimplifier::add_adjacent_rules(CmiTriplet t)
         }
 
         // CHAIN:
-
-        // I(c|z)
-        if (t[0] == t[1])
-        {
-            for (int a : util::disjoint_subsets(t[0] | t[2], full_set))
-                for (int b : util::disjoint_subsets(t[0] | t[2], full_set))
-                    add_rule(Rule{Rule::CHAIN, t[2], a, b, t[0], t.scenario});
-            // TODO
-        }
 
         // I(a;b|c,z)
         for (int z : util::all_subsets(t[2], full_set))
@@ -1454,6 +1440,29 @@ void ShannonProofSimplifier::add_adjacent_rules(CmiTriplet t)
     }
 }
 
+// Applies the rules that were excluded from add_adjacent_rules because they result in a quadratic
+// (in full_set) branching factor.
+void ShannonProofSimplifier::add_adjacent_rules_quadratic(CmiTriplet t)
+{
+    int num_vars = random_var_names.size();
+    int full_set = (1 << num_vars) - 1;
+
+    if (t[0] != t[1])
+        return;
+
+    // CMI_DEF_I:
+    // I(c|z)
+    for (int a : util::disjoint_subsets(t[0] | t[2], full_set))
+        for (int b : util::disjoint_subsets(t[0] | t[2], full_set))
+            add_rule(Rule{Rule::CMI_DEF_I, t[2], a, b, t[0], t.scenario});
+
+    // CHAIN:
+    // I(c|z)
+    for (int a : util::disjoint_subsets(t[0] | t[2], full_set))
+        for (int b : util::disjoint_subsets(t[0] | t[2], full_set))
+            add_rule(Rule{Rule::CHAIN, t[2], a, b, t[0], t.scenario});
+}
+
 // Optimize complexity of proof. Note that here L0 norm (weight if rule used) is approximated by
 // L1 norm (weight proportional to use).
 bool ShannonProofSimplifier::simplify(int depth)
@@ -1488,11 +1497,18 @@ bool ShannonProofSimplifier::simplify(int depth)
         for (auto [cmi, v] : orig_proof.cmi_objective.entries)
             get_row_index(cmi);
 
+        std::map<CmiTriplet, int> prev_prev_cmi;
         for (int i = 0; i < depth; ++i)
         {
-            std::map<CmiTriplet, int> cmi_snapshot = cmi_indices;
-            for (auto [cmi, v] : cmi_snapshot)
+            std::map<CmiTriplet, int> prev_cmi = cmi_indices;
+
+            for (auto [cmi, v] : prev_cmi)
                 add_adjacent_rules(cmi);
+            if (i > 0)
+                for (auto [cmi, v] : prev_prev_cmi)
+                    add_adjacent_rules_quadratic(cmi);
+
+            prev_prev_cmi = std::move(prev_cmi);
         }
     }
 
