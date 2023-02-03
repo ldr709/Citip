@@ -326,11 +326,11 @@ void ParserOutput::relation(ast::Relation re)
 }
 void ParserOutput::mutual_independence(ast::MutualIndependence mi)
 {
-    statement_list.emplace_back(std::in_place_index_t<MARKOV_CHAIN>(), move(mi));
+    statement_list.emplace_back(std::in_place_index_t<MUTUAL_INDEPENDENCE>(), move(mi));
 }
 void ParserOutput::markov_chain(ast::MarkovChain mc)
 {
-    statement_list.emplace_back(std::in_place_index_t<MUTUAL_INDEPENDENCE>(), move(mc));
+    statement_list.emplace_back(std::in_place_index_t<MARKOV_CHAIN>(), move(mc));
 }
 void ParserOutput::function_of(ast::FunctionOf fo)
 {
