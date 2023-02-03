@@ -686,8 +686,11 @@ void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
             for (int i = 0; i < view.size(); ++i)
                 if ((set >> i) & 1)
                     out_set |= (1 << get_var_index(view[i]));
-            return apply_implicits(funcs, out_set);
+            return funcs, out_set;
         };
+
+        // Avoid adding redundant rules.
+        std::set<std::array<int, 6>> added_rules;
 
         // Redundantly include all pairs of CMIs, rather than just the base entropies, so
         // that the simplifier can pick the most useful equalities.
@@ -704,23 +707,24 @@ void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
                     if (a != b && (a | b) == b)
                         continue;
 
-                    int a0 = convert_set(view0, a);
-                    int a1 = convert_set(view1, a);
-                    int b0 = convert_set(view0, b);
-                    int b1 = convert_set(view1, b);
-                    int z0 = convert_set(view0, z);
-                    int z1 = convert_set(view1, z);
+                    CmiTriplet cmi0(funcs, convert_set(view0, a), convert_set(view0, b), convert_set(view0, z), scenario0, false);
+                    CmiTriplet cmi1(funcs, convert_set(view1, a), convert_set(view1, b), convert_set(view1, z), scenario1, false);
 
-                    if (CmiTriplet(funcs, a0, b0, z0, scenario0) != CmiTriplet(a0, b0, z0, scenario0))
-                        return -1;
-                    if (CmiTriplet(funcs, a0, b0, z0, scenario1) != CmiTriplet(a0, b0, z0, scenario1))
-                        return -1;
+                    if (!added_rules.insert({cmi0[0], cmi0[1], cmi0[2], cmi1[0], cmi1[1], cmi1[2]}).second)
+                        continue;
+
+                    bool use_cmi0 = (cmi0[0] != 0 && cmi0[1] != 0);
+                    bool use_cmi1 = (cmi1[0] != 0 && cmi1[1] != 0);
+                    if (!use_cmi0 && !use_cmi1)
+                        continue;
 
                     SparseVector v;
                     SparseVectorT<CmiTriplet> cmi_v;
                     cmi_v.is_equality = v.is_equality = true;
-                    add_cmi(v, cmi_v, CmiTriplet(a0, b0, z0, scenario0), 1.0);
-                    add_cmi(v, cmi_v, CmiTriplet(a1, b1, z1, scenario1), -1.0);
+                    if (use_cmi0)
+                        add_cmi(v, cmi_v, cmi0, 1.0);
+                    if (use_cmi1)
+                        add_cmi(v, cmi_v, cmi1, -1.0);
                     add_relation(move(v), move(cmi_v), is_inquiry);
                 }
             }
