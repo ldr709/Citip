@@ -2,6 +2,7 @@
 #include <utility>      // move
 #include <sstream>      // istringstream
 #include <stdexcept>    // runtime_error
+#include <filesystem>
 #include <iostream>
 #include <thread>
 
@@ -1504,6 +1505,8 @@ bool ShannonProofSimplifier::simplify(int depth)
         for (auto [cmi, v] : orig_proof.cmi_objective.entries)
             get_row_index(cmi);
 
+        // TODO: can probably reduce the problem size using some kind of MITM, by only adding rules
+        // that can map back to two different original CMI triplets.
         std::map<CmiTriplet, int> prev_prev_cmi;
         for (int i = 0; i < depth; ++i)
         {
@@ -1995,8 +1998,14 @@ OrderedSimplifiedShannonProof SimplifiedShannonProof::order() const
     for (auto v : integer_vars)
         assert(si.isBinary(v));
 
-    si.writeLp("order_debug");
-    si.writeMps("order_problem");
+    std::string temp_dir = "/tmp/Citip.XXXXXXXX";
+    assert(mkdtemp(temp_dir.data()));
+
+    auto problem_filename = temp_dir + "/order_problem";
+
+    //si.writeLp("order_debug");
+    si.writeMps(problem_filename.c_str());
+    problem_filename += ".mps.gz";
 
     si.setHintParam(OsiDoReducePrint);
 
@@ -2024,7 +2033,7 @@ OrderedSimplifiedShannonProof SimplifiedShannonProof::order() const
         CbcMain0(model, solverData);
 
         // For some reason it's faster to save & load the model.
-        const char* argv[] = {"", "-threads", threads_str.c_str(), "-import", "order_problem.mps.gz", "-solve"};
+        const char* argv[] = {"", "-threads", threads_str.c_str(), "-import", problem_filename.c_str(), "-solve"};
         CbcMain1(6, argv, model, [](CbcModel *currentSolver, int whereFrom) -> int { return 0; },
                  solverData);
 
@@ -2042,7 +2051,7 @@ OrderedSimplifiedShannonProof SimplifiedShannonProof::order() const
 
         SCIPincludeDefaultPlugins(scip.get());
 
-        SCIPreadProb(scip.get(), "order_problem.mps.gz", nullptr);
+        SCIPreadProb(scip.get(), problem_filename.c_str(), nullptr);
         if (SCIPgetStage(scip.get()) == SCIP_STAGE_PROBLEM)
             succeeded = true;
 
@@ -2074,6 +2083,8 @@ OrderedSimplifiedShannonProof SimplifiedShannonProof::order() const
             sol = sol_storage.get();
         }
     }
+
+    std::filesystem::remove_all(temp_dir);
 
     if (!succeeded) {
         throw std::runtime_error("LinearProblem: Failed to solve LP.");
