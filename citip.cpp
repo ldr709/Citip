@@ -569,6 +569,7 @@ void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
                             int scenario1, const ast::VarList& view1)
     {
         assert(view0.size() == view1.size());
+        assert(view0.size() > 0);
 
         int full_set = (1 << view0.size()) - 1;
 
@@ -916,13 +917,15 @@ void ShannonRule::print(std::ostream& out, const ShannonVar* vars, double scale)
 ShannonTypeProof ShannonTypeProblem::prove(const SparseVector& I,
                                            SparseVectorT<CmiTriplet> cmi_I)
 {
+    LinearProof lproof = LinearProblem::prove(I, row_to_cmi);
     ShannonTypeProof proof(
-        LinearProblem::prove(I, row_to_cmi),
+        lproof,
         [&] (const LinearVariable& v) { return ShannonVar{random_var_names, scenario_names, v.id}; },
         [&] (const NonNegativityOrOtherRule<CmiTriplet>& r) -> ShannonRule {
             if (r.index() == 0)
             {
-                auto [set, scenario] = var_to_set_and_scenario(std::get<0>(r).v, random_var_names.size());
+                const LinearVariable& var = lproof.variables[std::get<0>(r).v];
+                auto [set, scenario] = var_to_set_and_scenario(var.id, random_var_names.size());
                 return ShannonRule({set, set, 0, scenario});
             }
             else
@@ -1163,7 +1166,7 @@ int ShannonProofSimplifier::add_rule(const Rule& r)
 
     case Rule::MI_DEF_CI:
         // I(a;b|z) = I(a|z) - I(a|b,z)
-        if (!((a & z) == 0 && (b & z) == 0 && a > 0 && b > 0 && a != b))
+        if (!((a & z) == 0 && (b & z) == 0 && a > 0 && b > 0 && a != b && (a | b) != a && (a | b) != b))
             return -1;
         break;
 

@@ -339,6 +339,8 @@ struct CmiTriplet :
 
         if ((t[0] | t[1]) == t[1])
             t[1] = t[0];
+
+        assert(t[0] != 0 && t[1] != 0);
     }
 
     double complexity_cost() const;
