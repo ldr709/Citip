@@ -20,11 +20,28 @@ try
     vector<string> expr;
 
     int depth = 1;
-    if (argc > 2 && strcmp(argv[1], "-d") == 0)
+    bool check = false;
+
+    // Parse arguments
+    while (true)
     {
-        depth = std::atoi(argv[2]);
-        argv += 2;
-        argc -= 2;
+        if (argc > 2 && strcmp(argv[1], "-d") == 0)
+        {
+            depth = std::atoi(argv[2]);
+            argv += 2;
+            argc -= 2;
+            continue;
+        }
+
+        if (argc > 1 && strcmp(argv[1], "-c") == 0)
+        {
+            check = true;
+            argv++;
+            argc--;
+            continue;
+        }
+
+        break;
     }
 
     bool use_stdin = argc == 1;
@@ -51,6 +68,12 @@ try
         {
             success = false;
             break;
+        }
+
+        if (check)
+        {
+            std::cout << "Optimal: " << proof.dual_solution.get(0) << '\n';
+            continue;
         }
 
         SimplifiedShannonProof simplified_proof = proof.simplify(depth);
