@@ -65,6 +65,7 @@ namespace ast
     struct FunctionOf {
         std::string scenario;
         VarList function, of;
+        bool implicit;
     };
 
     // Specifies that each view (a collection of random variables) must be indistinguishable across

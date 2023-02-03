@@ -40,6 +40,7 @@
 %token <int>            SIGN
                         REL
 %token <int>            INDIST
+%token <int>            IMPLICIT
 
 %type <ast::Relation>                   inform_inequ
 %type <ast::VarCore>                    mutual_indep
@@ -47,6 +48,7 @@
 %type <ast::VarCore>                    markov_chain
 %type <std::vector<ast::VarList>>       markov_chain_list
 %type <ast::FunctionOf>                 determ_depen
+%type <bool>                            determ_opt
 %type <ast::Expression>                 inform_expr
 %type <ast::Term>                       inform_term
 %type <ast::Quantity>                   inform_quant
@@ -119,42 +121,46 @@ statement    : %empty           { /* allow empty (or pure comment) lines */ }
 
     /* statements */
 
-inform_inequ      : inform_expr REL inform_expr                 { $$ = {$1, $2, $3}; }
+inform_inequ      : inform_expr REL inform_expr                    { $$ = {$1, $2, $3}; }
                   ;
 
-markov_chain      : markov_chain_list                           { $$ = {"", $1}; }
-                  | scenario ';' markov_chain_list              { $$ = {$1, $3}; }
+markov_chain      : markov_chain_list                              { $$ = {"", $1}; }
+                  | scenario ';' markov_chain_list                 { $$ = {$1, $3}; }
                   ;
 
-markov_chain_list : markov_chain_list '/' var_list              { $$ = enlist($1, $3); }
-                  | var_list '/' var_list '/' var_list          { $$ = {$1, $3, $5}; }
+markov_chain_list : markov_chain_list '/' var_list                 { $$ = enlist($1, $3); }
+                  | var_list '/' var_list '/' var_list             { $$ = {$1, $3, $5}; }
                   ;
 
-mutual_indep      : mutual_indep_list                           { $$ = {"", $1}; }
-                  | scenario ';' mutual_indep_list              { $$ = {$1, $3}; }
+mutual_indep      : mutual_indep_list                              { $$ = {"", $1}; }
+                  | scenario ';' mutual_indep_list                 { $$ = {$1, $3}; }
                   ;
 
-mutual_indep_list : mutual_indep_list '.' var_list              { $$ = enlist($1, $3); }
-                  |     var_list '.' var_list                   { $$ = {$1, $3}; }
+mutual_indep_list : mutual_indep_list '.' var_list                 { $$ = enlist($1, $3); }
+                  |     var_list '.' var_list                      { $$ = {$1, $3}; }
                   ;
 
-determ_depen      : var_list ':' var_list                       { $$ = {"", $1, $3}; }
-                  | scenario ';' var_list ':' var_list          { $$ = {$1, $3, $5}; }
+determ_depen      : var_list ':' var_list determ_opt               { $$ = {"", $1, $3, $4}; }
+                  | scenario ';' var_list ':' var_list determ_opt  { $$ = {$1, $3, $5, $6}; }
                   ;
 
-indist            : INDIST indist_list                          { $$ = $2; }
-                  | INDIST var_list                             { $$ = {{{}, $2}}; }
+determ_opt        : IMPLICIT                                       { $$ = true; }
+                  | %empty                                         { $$ = false; }
                   ;
 
-indist_list       : indist_list ':' indist_item                 { $$ = enlist($1, $3); }
-                  | indist_item                                 { $$ = {$1}; }
+indist            : INDIST indist_list                             { $$ = $2; }
+                  | INDIST ';' var_list                            { $$ = {{{}, $3}}; }
                   ;
 
-indist_item       : scenario_list ';' var_list                  { $$ = {$1, $3}; }
+indist_list       : indist_list ':' indist_item                    { $$ = enlist($1, $3); }
+                  | indist_item                                    { $$ = {$1}; }
                   ;
 
-scenario_list     : scenario_list ',' scenario                  { $$ = enlist($1, $3); }
-                  | scenario                                    { $$ = {$1}; }
+indist_item       : scenario_list ';' var_list                     { $$ = {$1, $3}; }
+                  ;
+
+scenario_list     : scenario_list ',' scenario                     { $$ = enlist($1, $3); }
+                  | scenario                                       { $$ = {$1}; }
                   ;
 
     /* building blocks */

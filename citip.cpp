@@ -44,7 +44,6 @@ void CoinOsiProblem::append_with_default(std::vector<double>& vec, int size, dou
 {
     if (val != def)
     {
-        //std::cout << "Adding index " << (size - 1) << '\n';
         vec.resize(size, def);
         vec.back() = val;
     }
@@ -56,10 +55,6 @@ int CoinOsiProblem::add_row(double lb, double ub, int count, int* indices, doubl
 {
     int idx = num_rows++;
 
-    //std::cout << "Adding row " << idx << '\n';
-    //for (int i = 0; i < count; ++i)
-    //    std::cout << '(' << idx << ", " << indices[i] << ')' << " = " << values[i] << '\n';
-
     constraints.appendRow(count, indices, values);
     append_with_default(rowlb, num_rows, lb, -infinity);
     append_with_default(rowub, num_rows, ub, infinity);
@@ -70,10 +65,6 @@ int CoinOsiProblem::add_row(double lb, double ub, int count, int* indices, doubl
 int CoinOsiProblem::add_col(double lb, double ub, double obj_, int count, int* indices, double* values)
 {
     int idx = num_cols++;
-
-    //std::cout << "Adding col " << idx << '\n';
-    //for (int i = 0; i < count; ++i)
-    //    std::cout << '(' << indices[i] << ", " << idx << ')' << " = " << values[i] << '\n';
 
     constraints.appendCol(count, indices, values);
     append_with_default(collb, num_cols, lb, -infinity);
@@ -116,16 +107,103 @@ static std::array<int, 2> var_to_set_and_scenario(int v, int num_vars)
     return {((v - 1) % dim_per_scenario) + 1, (v - 1) / dim_per_scenario};
 }
 
+static int apply_implicits(const std::vector<ImplicitFunctionOf>& funcs, int set)
+{
+    bool changed;
+    do
+    {
+        changed = false;
+        for (auto f : funcs)
+        {
+            if ((set & f.of) == f.of && (set | f.func) != set)
+            {
+                set |= f.func;
+                changed = true;
+            }
+        }
+    } while (changed);
+
+    return set;
+}
+
+CmiTriplet::CmiTriplet(int a, int b, int c, int scenario_) :
+    std::array<int, 3>{a, b, c},
+    scenario(scenario_)
+{
+    auto& t = *this;
+    t[0] &= ~t[2];
+    t[1] &= ~t[2];
+
+    if (t[0] > t[1])
+        std::swap(t[0], t[1]);
+
+    if ((t[0] | t[1]) == t[1])
+        t[1] = t[0];
+
+    assert(t[0] != 0 && t[1] != 0);
+}
+
+CmiTriplet::CmiTriplet(const std::vector<ImplicitFunctionOf>& funcs,
+                       int a, int b, int c, int scenario_, bool check_nonzero) :
+    std::array<int, 3>{a, b, c},
+    scenario(scenario_)
+{
+    auto& t = *this;
+    t[2] = apply_implicits(funcs, t[2]);
+
+    t[0] = apply_implicits(funcs, t[0] | t[2]) & ~t[2];
+    t[1] = apply_implicits(funcs, t[1] | t[2]) & ~t[2];
+
+    if (t[0] > t[1])
+        std::swap(t[0], t[1]);
+
+    if ((t[0] | t[1]) == t[1])
+        t[1] = t[0];
+
+    if (check_nonzero)
+        assert(t[0] != 0 && t[1] != 0);
+}
+
+static int scenario_var(const std::vector<ImplicitFunctionOf>& funcs, int num_vars, int scenario, int a)
+{
+    int dim_per_scenario = (1 << num_vars) - 1;
+    return scenario * dim_per_scenario + apply_implicits(funcs, a);
+}
+
+
+void ShannonTypeProblem::add_columns()
+{
+    for (int i = 1; i < (1<<random_var_names.size()); ++i)
+    {
+        auto [it, inserted] = column_map.insert({apply_implicits(funcs, i), column_map.size()});
+        if (inserted)
+            inv_column_map.push_back(it->first);
+    }
+
+    // Repeat same pattern for each scenario.
+    int dim_per_scenario = (1 << random_var_names.size()) - 1;
+    int real_dim_per_scenario = column_map.size();
+    for (int scenario = 1; scenario < scenario_names.size(); ++scenario)
+    {
+        for (int i = 0; i < real_dim_per_scenario; ++i)
+        {
+            int s = inv_column_map[i];
+            int j = dim_per_scenario * scenario + s;
+            column_map.insert({j, column_map.size()});
+            inv_column_map.push_back(j);
+        }
+    }
+
+    add_columns(column_map.size());
+}
 
 void ShannonTypeProblem::add_elemental_inequalities(int num_vars, int num_scenarios)
 {
-
     // Identify each variable with its index i from I = {0, 1, ..., N-1}.
     // Then entropy is a real valued set function from the power set of
     // indices P = 2**I. The value for the empty set can be defined to be
     // zero and is irrelevant. Therefore the dimensionality of the problem
     // is 2**N-1 (times num_scenarios).
-    int dim_per_scenario = (1<<num_vars) - 1;
 
     // After choosing 2 variables there are 2**(N-2) possible subsets of
     // the remaining N-2 variables.
@@ -142,6 +220,7 @@ void ShannonTypeProblem::add_elemental_inequalities(int num_vars, int num_scenar
         int i, a, b;
 
         if (num_vars == 1) {
+            assert(column_map.size() == 1);
             indices[0] = scenario;
             values[0] = 1;
             coin.add_row_lb(0.0, 1, indices, values);
@@ -153,18 +232,21 @@ void ShannonTypeProblem::add_elemental_inequalities(int num_vars, int num_scenar
         // all variables. NOTE: since the left-most column is not used, the
         // variables involved in a joint entropy correspond exactly to the bit
         // representation of its index.
-        size_t all = dim_per_scenario;
+        size_t all = (1<<num_vars) - 1;
 
         // Add all elemental conditional entropy positivities, i.e. those of
         // the form H(X_i|X_c)>=0 where c = ~ {i}:
         for (i = 0; i < num_vars; ++i) {
             int c = all ^ (1 << i);
-            indices[0] = dim_per_scenario * scenario + all - 1;
-            indices[1] = dim_per_scenario * scenario + c - 1;
+            if (all == apply_implicits(funcs, c))
+                continue;
+
+            indices[0] = column_map.at(scenario_var(funcs, random_var_names.size(), scenario, all));
+            indices[1] = column_map.at(scenario_var(funcs, random_var_names.size(), scenario, c));
             values[0] = +1;
             values[1] = -1;
             int row = coin.add_row_lb(0.0, 2, indices, values);
-            row_to_cmi.emplace_back(CmiTriplet{1 << i, 1 << i, c, scenario});
+            row_to_cmi.emplace_back(CmiTriplet(funcs, 1 << i, 1 << i, c, scenario));
         }
 
         // Add all elemental conditional mutual information positivities, i.e.
@@ -175,16 +257,22 @@ void ShannonTypeProblem::add_elemental_inequalities(int num_vars, int num_scenar
                 int B = 1 << b;
                 for (i = 0; i < sub_dim; ++i) {
                     int K = skip_bit(skip_bit(i, a), b);
-                    indices[0] = dim_per_scenario * scenario + (A|K) - 1;
-                    indices[1] = dim_per_scenario * scenario + (B|K) - 1;
-                    indices[2] = dim_per_scenario * scenario + (A|B|K) - 1;
-                    indices[3] = dim_per_scenario * scenario + (K) - 1;
+                    if (K != apply_implicits(funcs, K))
+                        continue;
+
+                    indices[0] = column_map.at(scenario_var(funcs, random_var_names.size(), scenario, A|K));
+                    indices[1] = column_map.at(scenario_var(funcs, random_var_names.size(), scenario, B|K));
+                    indices[2] = column_map.at(scenario_var(funcs, random_var_names.size(), scenario, A|B|K));
                     values[0] = +1;
                     values[1] = +1;
                     values[2] = -1;
-                    values[3] = -1;
+                    if (K)
+                    {
+                        indices[3] = column_map.at(scenario_var(funcs, random_var_names.size(), scenario, K));
+                        values[3] = -1;
+                    }
                     int row = coin.add_row_lb(0.0, K ? 4 : 3, indices, values);
-                    row_to_cmi.emplace_back(CmiTriplet{A,B,K, scenario});
+                    row_to_cmi.emplace_back(CmiTriplet(funcs, A,B,K, scenario));
                 }
             }
         }
@@ -208,7 +296,6 @@ void ParserOutput::add_term(SparseVector& v, SparseVectorT<CmiTriplet>& cmi_v,
     }
 
     const int scenario = q.parts.scenario == "" ? scenario_wildcard : scenarios.at(q.parts.scenario);
-    const int dim_per_scenario = (1<<var_names.size()) - 1;
 
     // Need to index 2**num_parts subsets. For more detailed reasoning see
     // the check_num_vars() function.
@@ -223,7 +310,7 @@ void ParserOutput::add_term(SparseVector& v, SparseVectorT<CmiTriplet>& cmi_v,
     //
     //          I(a:…:y:z) = I(a:…:y) - I(a:…:y|z)
     //
-    // Here, it is calculated as the alternating sum of (conditional)
+    // These rules were rewritten from the alternating sum of (conditional)
     // entropies of all subsets of the parts [Jakulin & Bratko (2003)].
     //
     //      I(X₁:…:Xₙ|Y) = - Σ (-1)^|T| H(T|Y)
@@ -235,34 +322,16 @@ void ParserOutput::add_term(SparseVector& v, SparseVectorT<CmiTriplet>& cmi_v,
     std::vector<int> set_indices(num_parts);
     for (int i = 0; i < num_parts; ++i)
         set_indices[i] = get_set_index(q.parts.lists[i]);
-
-    int num_subsets = 1 << num_parts;
     int c = get_set_index(q.cond);
-    // Start at i=1 because i=0 which corresponds to H(empty set) gives no
-    // contribution to the sum. Furthermore, the i=0 is already reserved
-    // for the constant term for our purposes.
-    for (int set = 1; set < num_subsets; ++set) {
-        int a = 0;
-        int s = -1;
-        for (int i = 0; i < num_parts; ++i) {
-            if (set & 1<<i) {
-                a |= set_indices[i];
-                s = -s;
-            }
-        }
-        v.inc(scenario * dim_per_scenario + (a|c), s*coef);
-    }
-    if (c)
-        v.inc(scenario * dim_per_scenario + c, -coef);
 
-    // Also write the term using conditional mutual informations. That is, don't go all the way down
-    // to individual entropies.
     if (num_parts == 1)
     {
-        cmi_v.inc(CmiTriplet{set_indices[0], set_indices[0], c, scenario}, coef);
+        add_cmi(v, cmi_v, CmiTriplet{set_indices[0], set_indices[0], c, scenario}, coef);
     }
     else
     {
+        // Use conditional mutual informations. That is, don't go all the way down to individual
+        // entropies.
         // I(X₁:…:Xₙ|Y) = - Σ (-1)^|T| H(T|Y)
         // = - Σ (-1)^|T'| (H(T'|Y) - H(T',X_n|Y)) = Σ (-1)^|T'| H(X_n|T',Y)
         // = Σ (-1)^|T''| (H(X_n|T'',Y) - H(X_n|T'',X_{n-1},Y))
@@ -280,7 +349,7 @@ void ParserOutput::add_term(SparseVector& v, SparseVectorT<CmiTriplet>& cmi_v,
                     s = -s;
                 }
             }
-            cmi_v.inc(CmiTriplet{set_indices[num_parts-2], set_indices[num_parts-1], z, scenario}, s*coef);
+            add_cmi(v, cmi_v, CmiTriplet{set_indices[num_parts-2], set_indices[num_parts-1], z, scenario}, s*coef);
         }
     }
 }
@@ -302,7 +371,7 @@ int ParserOutput::get_set_index(const ast::VarList& l)
     int idx = 0;
     for (auto&& v : l)
         idx |= 1 << get_var_index(v);
-    return idx;
+    return apply_implicits(funcs, idx);
 }
 
 void ParserOutput::add_relation(SparseVector v, SparseVectorT<CmiTriplet> cmi_v, bool is_inquiry)
@@ -391,6 +460,39 @@ void ParserOutput::process()
     if (scenario_names.empty())
         add_scenario("");
 
+    // Retrieve the implicit function_of statements.
+    for (const auto& s : statement_list)
+    {
+        if (s.index() == FUNCTION_OF)
+        {
+            const auto& fo = std::get<FUNCTION_OF>(s);
+            if (!fo.implicit)
+                continue;
+            if (fo.scenario != "")
+                throw std::runtime_error("Implicit function-of rules must apply to all scenarios.");
+
+            int func = get_set_index(fo.function);
+            int of = get_set_index(fo.of);
+            funcs.push_back({func, of});
+        }
+    }
+
+    // Apply the functions_of statements to each other, so that later they can be resolved faster.
+    bool changed;
+    do
+    {
+        changed = false;
+        for (auto& f : funcs)
+        {
+            int new_func = f.func | (apply_implicits(funcs, f.func | f.of) & ~f.of);
+            if (new_func != f.func)
+            {
+                f.func = new_func;
+                changed = true;
+            }
+        }
+    } while (changed);
+
     for (const auto& s : statement_list)
         process_statement(s);
 }
@@ -406,6 +508,21 @@ void ParserOutput::add_symbols(const ast::VarList& vl)
 {
     for (auto&& v : vl)
         get_var_index(v);
+}
+
+void ParserOutput::add_cmi(SparseVector& v, SparseVectorT<CmiTriplet>& cmi_v,
+                           CmiTriplet t, double coeff) const
+{
+    t = CmiTriplet(funcs, t[0], t[1], t[2], t.scenario);
+    auto [a, b, z] = t;
+
+    v.inc(scenario_var(funcs, var_names.size(), t.scenario, a|z), coeff);
+    v.inc(scenario_var(funcs, var_names.size(), t.scenario, b|z), coeff);
+    v.inc(scenario_var(funcs, var_names.size(), t.scenario, a|b|z), -coeff);
+    if (z)
+        v.inc(scenario_var(funcs, var_names.size(), t.scenario, z), -coeff);
+
+    cmi_v.inc(t, coeff);
 }
 
 void ParserOutput::process_statement(const statement& s)
@@ -438,7 +555,6 @@ void ParserOutput::process_statement(const statement& s)
 
 void ParserOutput::process_relation(const ast::Relation& re)
 {
-    const int dim_per_scenario = (1<<var_names.size()) - 1;
     bool is_inquiry = inquiries.empty();
 
     bool has_wildcard_scenario = false;
@@ -482,7 +598,6 @@ void ParserOutput::process_mutual_independence(const ast::MutualIndependence& mi
 {
     const int first_scenario = mi.scenario == "" ? 0 : scenarios.at(mi.scenario);
     const int last_scenario = mi.scenario == "" ? scenario_names.size() : first_scenario + 1;
-    const int dim_per_scenario = (1<<var_names.size()) - 1;
 
     bool is_inquiry = inquiries.empty();
 
@@ -496,11 +611,9 @@ void ParserOutput::process_mutual_independence(const ast::MutualIndependence& mi
         for (auto&& vl : mi.lists) {
             int idx = get_set_index(vl);
             all |= idx;
-            v.inc(scenario * dim_per_scenario + idx, 1);
-            cmi_v.inc(CmiTriplet{idx,idx,0, scenario}, 1);
+            add_cmi(v, cmi_v, CmiTriplet{idx,idx,0, scenario}, 1);
         }
-        v.inc(scenario * dim_per_scenario + all, -1);
-        cmi_v.inc(CmiTriplet{all,all,0, scenario}, -1);
+        add_cmi(v, cmi_v, CmiTriplet{all,all,0, scenario}, -1);
         add_relation(move(v), move(cmi_v), is_inquiry);
     }
 }
@@ -509,7 +622,6 @@ void ParserOutput::process_markov_chain(const ast::MarkovChain& mc)
 {
     const int first_scenario = mc.scenario == "" ? 0 : scenarios.at(mc.scenario);
     const int last_scenario = mc.scenario == "" ? scenario_names.size() : first_scenario + 1;
-    const int dim_per_scenario = (1<<var_names.size()) - 1;
 
     bool is_inquiry = inquiries.empty();
 
@@ -525,11 +637,7 @@ void ParserOutput::process_markov_chain(const ast::MarkovChain& mc)
             SparseVector v;
             SparseVectorT<CmiTriplet> cmi_v;
             cmi_v.is_equality = v.is_equality = true;
-            cmi_v.inc(CmiTriplet{a,c,b, scenario}, 1);
-            v.inc(scenario * dim_per_scenario + (a|b), 1);
-            v.inc(scenario * dim_per_scenario + (c|b), 1);
-            v.inc(scenario * dim_per_scenario + (b), -1);
-            v.inc(scenario * dim_per_scenario + (a|b|c), -1);
+            add_cmi(v, cmi_v, CmiTriplet{a,c,b, scenario}, 1);
             add_relation(move(v), move(cmi_v), is_inquiry);
         }
     }
@@ -537,13 +645,16 @@ void ParserOutput::process_markov_chain(const ast::MarkovChain& mc)
 
 void ParserOutput::process_function_of(const ast::FunctionOf& fo)
 {
-    const int first_scenario = fo.scenario == "" ? 0 : scenarios.at(fo.scenario);
-    const int last_scenario = fo.scenario == "" ? scenario_names.size() : first_scenario + 1;
-    const int dim_per_scenario = (1<<var_names.size()) - 1;
+    // Already handled.
+    if (fo.implicit)
+        return;
 
     bool is_inquiry = inquiries.empty();
     int func = get_set_index(fo.function);
     int of = get_set_index(fo.of);
+
+    const int first_scenario = fo.scenario == "" ? 0 : scenarios.at(fo.scenario);
+    const int last_scenario = fo.scenario == "" ? scenario_names.size() : first_scenario + 1;
 
     for (int scenario = first_scenario; scenario < last_scenario; ++scenario)
     {
@@ -551,17 +662,13 @@ void ParserOutput::process_function_of(const ast::FunctionOf& fo)
         SparseVector v;
         SparseVectorT<CmiTriplet> cmi_v;
         cmi_v.is_equality = v.is_equality = true;
-        cmi_v.inc(CmiTriplet{func,func,of,scenario}, 1);
-        v.inc(scenario * dim_per_scenario + (func|of), 1);
-        v.inc(scenario * dim_per_scenario + (of), -1);
+        add_cmi(v, cmi_v, CmiTriplet{func,func,of,scenario}, 1);
         add_relation(move(v), move(cmi_v), is_inquiry);
     }
 }
 
 void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
 {
-    const int dim_per_scenario = (1<<var_names.size()) - 1;
-
     bool is_inquiry = inquiries.empty();
 
     // Require that all entropies defined by the view match between the scenarios.
@@ -579,13 +686,15 @@ void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
             for (int i = 0; i < view.size(); ++i)
                 if ((set >> i) & 1)
                     out_set |= (1 << get_var_index(view[i]));
-            return out_set;
+            return apply_implicits(funcs, out_set);
         };
 
         // Redundantly include all pairs of CMIs, rather than just the base entropies, so
         // that the simplifier can pick the most useful equalities.
         for (int z : util::disjoint_subsets(0, full_set))
         {
+            if (z != apply_implicits(funcs, z))
+                continue;
             for (int b : util::skip_n(util::disjoint_subsets(z, full_set), 1))
             {
                 for (int a : util::skip_n(util::disjoint_subsets(z, full_set), 1))
@@ -595,23 +704,23 @@ void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
                     if (a != b && (a | b) == b)
                         continue;
 
+                    int a0 = convert_set(view0, a);
+                    int a1 = convert_set(view1, a);
+                    int b0 = convert_set(view0, b);
+                    int b1 = convert_set(view1, b);
+                    int z0 = convert_set(view0, z);
+                    int z1 = convert_set(view1, z);
+
+                    if (CmiTriplet(funcs, a0, b0, z0, scenario0) != CmiTriplet(a0, b0, z0, scenario0))
+                        return -1;
+                    if (CmiTriplet(funcs, a0, b0, z0, scenario1) != CmiTriplet(a0, b0, z0, scenario1))
+                        return -1;
+
                     SparseVector v;
                     SparseVectorT<CmiTriplet> cmi_v;
                     cmi_v.is_equality = v.is_equality = true;
-                    v.inc(scenario0 * dim_per_scenario + convert_set(view0, a|z), 1.0);
-                    v.inc(scenario1 * dim_per_scenario + convert_set(view1, a|z), -1.0);
-                    v.inc(scenario0 * dim_per_scenario + convert_set(view0, b|z), 1.0);
-                    v.inc(scenario1 * dim_per_scenario + convert_set(view1, b|z), -1.0);
-                    v.inc(scenario0 * dim_per_scenario + convert_set(view0, a|b|z), -1.0);
-                    v.inc(scenario1 * dim_per_scenario + convert_set(view1, a|b|z), 1.0);
-                    if (z)
-                    {
-                        v.inc(scenario0 * dim_per_scenario + convert_set(view0, z), -1.0);
-                        v.inc(scenario1 * dim_per_scenario + convert_set(view1, z), 1.0);
-                    }
-
-                    cmi_v.inc(CmiTriplet{convert_set(view0, a), convert_set(view0, b), convert_set(view0, z), scenario0}, 1.0);
-                    cmi_v.inc(CmiTriplet{convert_set(view1, a), convert_set(view1, b), convert_set(view1, z), scenario1}, -1.0);
+                    add_cmi(v, cmi_v, CmiTriplet(a0, b0, z0, scenario0), 1.0);
+                    add_cmi(v, cmi_v, CmiTriplet(a1, b1, z1, scenario1), -1.0);
                     add_relation(move(v), move(cmi_v), is_inquiry);
                 }
             }
@@ -786,14 +895,14 @@ LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_r
         for (int j = 0; j < coin.num_cols; ++j)
             col_price[j] = coin.obj[j] - col_price[j];
 
-        for (int j = 1; j <= coin.num_cols; ++j)
+        for (int j = 0; j < coin.num_cols; ++j)
         {
             proof.variables.emplace_back(LinearVariable{j});
-            proof.regular_constraints.emplace_back(NonNegativityRule{j-1});
+            proof.regular_constraints.emplace_back(NonNegativityRule{j});
 
-            double coeff = col_price[j - 1];
+            double coeff = col_price[j];
             if (std::abs(coeff) > eps)
-                proof.dual_solution.entries[j] = coeff;
+                proof.dual_solution.entries[j + 1] = coeff;
         }
 
         for (int i = 0; i < coin.num_rows; ++i)
@@ -845,19 +954,22 @@ LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_r
 
 
 ShannonTypeProblem::ShannonTypeProblem(std::vector<std::string> random_var_names_,
-                                       std::vector<std::string> scenario_names_) :
+                                       std::vector<std::string> scenario_names_,
+                                       std::vector<ImplicitFunctionOf> implicit_function_ofs_) :
     LinearProblem(),
     random_var_names(move(random_var_names_)),
-    scenario_names(move(scenario_names_))
+    scenario_names(move(scenario_names_)),
+    funcs(move(implicit_function_ofs_))
 {
     int num_vars = random_var_names.size();
     check_num_vars(num_vars);
-    add_columns(scenario_names.size() * ((1<<num_vars) - 1));
+
+    add_columns();
     add_elemental_inequalities(num_vars, scenario_names.size());
 }
 
 ShannonTypeProblem::ShannonTypeProblem(const ParserOutput& out) :
-    ShannonTypeProblem(out.var_names, out.scenario_names)
+    ShannonTypeProblem(out.var_names, out.scenario_names, out.funcs)
 {
     for (int i = 0; i < out.constraints.size(); ++i)
         add(out.constraints[i], out.cmi_constraints[i]);
@@ -865,7 +977,11 @@ ShannonTypeProblem::ShannonTypeProblem(const ParserOutput& out) :
 
 void ShannonTypeProblem::add(const SparseVector& v, SparseVectorT<CmiTriplet> cmi_v)
 {
-    LinearProblem::add(v);
+    SparseVector realV;
+    realV.is_equality = v.is_equality;
+    for (const auto& [x, y] : v.entries)
+        realV.inc(x ? column_map.at(x) + 1 : 0, y);
+    LinearProblem::add(realV);
     cmi_constraints.push_back(move(cmi_v));
 }
 
@@ -906,26 +1022,40 @@ void ShannonRule::print(std::ostream& out, const ShannonVar* vars, double scale)
 {
     auto [a, b, z] = CmiTriplet(*this);
     print_coeff(out, scale, true);
-    out << 'H' << vars[1].scenario_names[scenario] << '(' << vars[a].print_vars();
+
+    auto& scenario_names = vars[0].scenario_names;
+    auto& column_map = vars[0].column_map;
+
+    out << 'H' << scenario_names[scenario] << '(' << vars[column_map.at(a)].print_vars();
     if (a != b)
-        out << "; " << vars[b].print_vars();
+        out << "; " << vars[column_map.at(b)].print_vars();
     if (z != 0)
-        out << " | " << vars[z].print_vars();
+        out << " | " << vars[column_map.at(z)].print_vars();
     out << ") >= 0";
 }
 
 ShannonTypeProof ShannonTypeProblem::prove(const SparseVector& I,
                                            SparseVectorT<CmiTriplet> cmi_I)
 {
-    LinearProof lproof = LinearProblem::prove(I, row_to_cmi);
+    SparseVector realObj;
+    realObj.is_equality = I.is_equality;
+    for (const auto& [x, y] : I.entries)
+        realObj.inc(x ? column_map.at(x) + 1 : 0, y);
+
+    LinearProof lproof = LinearProblem::prove(realObj, row_to_cmi);
     ShannonTypeProof proof(
         lproof,
-        [&] (const LinearVariable& v) { return ShannonVar{random_var_names, scenario_names, v.id}; },
+        [&] (const LinearVariable& v)
+        {
+            return ShannonVar{
+                random_var_names, scenario_names, column_map, funcs, inv_column_map[v.id]
+            };
+        },
         [&] (const NonNegativityOrOtherRule<CmiTriplet>& r) -> ShannonRule {
             if (r.index() == 0)
             {
-                const LinearVariable& var = lproof.variables[std::get<0>(r).v];
-                auto [set, scenario] = var_to_set_and_scenario(var.id, random_var_names.size());
+                int var = inv_column_map[lproof.variables[std::get<0>(r).v].id];
+                auto [set, scenario] = var_to_set_and_scenario(var, random_var_names.size());
                 return ShannonRule({set, set, 0, scenario});
             }
             else
@@ -975,6 +1105,7 @@ private:
 
     CoinOsiProblem coin;
 
+    const std::vector<ImplicitFunctionOf>& funcs;
     const std::vector<std::string>& random_var_names;
     const std::vector<std::string>& scenario_names;
 };
@@ -995,6 +1126,7 @@ SimplifiedShannonProof ShannonTypeProof::simplify(int depth) const
     bool changed;
     do
     {
+        changed = false;
         for (int d = 1; d <= depth; ++d)
         {
             changed = simplifier.simplify(d);
@@ -1054,11 +1186,11 @@ double CmiTriplet::complexity_cost() const
             return conditional_mutual_information_cost;
 }
 
-double ExtendedShannonRule::complexity_cost() const
+double ExtendedShannonRule::complexity_cost(const std::vector<ImplicitFunctionOf>& funcs) const
 {
     CmiTriplet triplets[5];
     double values[5];
-    int count = get_constraint(triplets, values);
+    int count = get_constraint(funcs, triplets, values);
 
     double cost = 0.0;
     for (int i = 0; i < count; ++i)
@@ -1078,62 +1210,63 @@ double ShannonProofSimplifier::custom_rule_complexity_cost(const SparseVectorT<C
 // Outputs into triplets[] and values[]. I've tried to avoid using any rule that contains
 // duplicates, but I might have missed some. These arrays much be at least 5 elements long. Returns
 // the size of the constraint
-int ExtendedShannonRule::get_constraint(CmiTriplet triplets[], double values[]) const
+int ExtendedShannonRule::get_constraint(const std::vector<ImplicitFunctionOf>& funcs,
+                                        CmiTriplet triplets[], double values[]) const
 {
     auto [z, a, b, c] = subsets;
 
     SparseVector constraint;
-    int count;
+    int count = 0;
     switch (type)
     {
     case CMI_DEF_I:
         // I(a;b|c,z) = I(a,c|z) + I(b,c|z) - I(a,b,c|z) - I(c|z)
-        triplets[count] = CmiTriplet{a, b, c|z, scenario};       values[count++] =  1.0;
-        triplets[count] = CmiTriplet{a|c, a|c, z, scenario};     values[count++] = -1.0;
-        triplets[count] = CmiTriplet{b|c, b|c, z, scenario};     values[count++] = -1.0;
-        triplets[count] = CmiTriplet{a|b|c, a|b|c, z, scenario}; values[count++] =  1.0;
-        triplets[count] = CmiTriplet{c, c, z, scenario};         values[count++] =  1.0;
+        triplets[count] = CmiTriplet(funcs, a, b, c|z, scenario);       values[count++] =  1.0;
+        triplets[count] = CmiTriplet(funcs, a|c, a|c, z, scenario);     values[count++] = -1.0;
+        triplets[count] = CmiTriplet(funcs, b|c, b|c, z, scenario);     values[count++] = -1.0;
+        triplets[count] = CmiTriplet(funcs, a|b|c, a|b|c, z, scenario); values[count++] =  1.0;
+        triplets[count] = CmiTriplet(funcs, c, c, z, scenario);         values[count++] =  1.0;
         break;
 
     case MI_DEF_I:
         // I(a;b|z) = I(a|z) + I(b|z) - I(a,b|z)
-        triplets[count] = CmiTriplet{a, b, z, scenario};         values[count++] =  1.0;
-        triplets[count] = CmiTriplet{a, a, z, scenario};         values[count++] = -1.0;
-        triplets[count] = CmiTriplet{b, b, z, scenario};         values[count++] = -1.0;
-        triplets[count] = CmiTriplet{a|b, a|b, z, scenario};     values[count++] =  1.0;
+        triplets[count] = CmiTriplet(funcs, a, b, z, scenario);         values[count++] =  1.0;
+        triplets[count] = CmiTriplet(funcs, a, a, z, scenario);         values[count++] = -1.0;
+        triplets[count] = CmiTriplet(funcs, b, b, z, scenario);         values[count++] = -1.0;
+        triplets[count] = CmiTriplet(funcs, a|b, a|b, z, scenario);     values[count++] =  1.0;
         break;
 
     case MI_DEF_CI:
         // I(a;b|z) = I(a|z) - I(a|b,z)
-        triplets[count] = CmiTriplet{a, b, z, scenario};         values[count++] =  1.0;
-        triplets[count] = CmiTriplet{a, a, z, scenario};         values[count++] = -1.0;
-        triplets[count] = CmiTriplet{a, a, b|z, scenario};       values[count++] =  1.0;
+        triplets[count] = CmiTriplet(funcs, a, b, z, scenario);         values[count++] =  1.0;
+        triplets[count] = CmiTriplet(funcs, a, a, z, scenario);         values[count++] = -1.0;
+        triplets[count] = CmiTriplet(funcs, a, a, b|z, scenario);       values[count++] =  1.0;
         break;
 
     case CHAIN:
         // I(c|z) + I(a;b|c,z) = I(a,c;b,c|z)
-        triplets[count] = CmiTriplet{c, c, z, scenario};         values[count++] =  1.0;
-        triplets[count] = CmiTriplet{a, b, c|z, scenario};       values[count++] =  1.0;
-        triplets[count] = CmiTriplet{a|c, b|c, z, scenario};     values[count++] = -1.0;
+        triplets[count] = CmiTriplet(funcs, c, c, z, scenario);         values[count++] =  1.0;
+        triplets[count] = CmiTriplet(funcs, a, b, c|z, scenario);       values[count++] =  1.0;
+        triplets[count] = CmiTriplet(funcs, a|c, b|c, z, scenario);     values[count++] = -1.0;
         break;
 
     case MUTUAL_CHAIN:
         // I(a;c|z) + I(a;b|c,z) = I(a;b,c|z)
-        triplets[count] = CmiTriplet{a, c, z, scenario};         values[count++] =  1.0;
-        triplets[count] = CmiTriplet{a, b, c|z, scenario};       values[count++] =  1.0;
-        triplets[count] = CmiTriplet{a, b|c, z, scenario};       values[count++] = -1.0;
+        triplets[count] = CmiTriplet(funcs, a, c, z, scenario);         values[count++] =  1.0;
+        triplets[count] = CmiTriplet(funcs, a, b, c|z, scenario);       values[count++] =  1.0;
+        triplets[count] = CmiTriplet(funcs, a, b|c, z, scenario);       values[count++] = -1.0;
         break;
 
     case MONOTONE_COND:
         // I(a,b|z) >= I(a|c,z)
-        triplets[count] = CmiTriplet{a|b, a|b, z, scenario};     values[count++] =  1.0;
-        triplets[count] = CmiTriplet{a, a, c|z, scenario};       values[count++] = -1.0;
+        triplets[count] = CmiTriplet(funcs, a|b, a|b, z, scenario);     values[count++] =  1.0;
+        triplets[count] = CmiTriplet(funcs, a, a, c|z, scenario);       values[count++] = -1.0;
         break;
 
     case MONOTONE_MUT:
         // I(a;b,c|z) >= I(a;b|z)
-        triplets[count] = CmiTriplet{a, b|c, z, scenario};     values[count++] =  1.0;
-        triplets[count] = CmiTriplet{a, b, z, scenario};       values[count++] = -1.0;
+        triplets[count] = CmiTriplet(funcs, a, b|c, z, scenario);       values[count++] =  1.0;
+        triplets[count] = CmiTriplet(funcs, a, b, z, scenario);         values[count++] = -1.0;
         break;
 
     default:
@@ -1150,11 +1283,14 @@ int ShannonProofSimplifier::add_rule(const Rule& r)
 {
     // Validate rule.
     auto [z, a, b, c] = r.subsets;
+    int scenario = r.scenario;
     switch (r.type)
     {
     case Rule::CMI_DEF_I:
         // I(a;b|c,z) = I(a,c|z) + I(b,c|z) - I(a,b,c|z) - I(c|z)
         if (!((a & z) == 0 && (b & z) == 0 && (c & (z | a | b)) == 0 && a > 0 && a < b && (a | b) != b && c > 0))
+            return -1;
+        if (CmiTriplet(funcs, a, b, c|z, scenario, false) != CmiTriplet(a, b, c|z, scenario))
             return -1;
         break;
 
@@ -1162,11 +1298,15 @@ int ShannonProofSimplifier::add_rule(const Rule& r)
         // I(a;b|z) = I(a|z) + I(b|z) - I(a,b|z)
         if (!((a & z) == 0 && (b & z) == 0 && a > 0 && a < b && (a | b) != b))
             return -1;
+        if (CmiTriplet(funcs, a, b, z, scenario, false) != CmiTriplet(a, b, z, scenario))
+            return -1;
         break;
 
     case Rule::MI_DEF_CI:
         // I(a;b|z) = I(a|z) - I(a|b,z)
         if (!((a & z) == 0 && (b & z) == 0 && a > 0 && b > 0 && a != b && (a | b) != a && (a | b) != b))
+            return -1;
+        if (CmiTriplet(funcs, a, b, z, scenario, false) != CmiTriplet(a, b, z, scenario))
             return -1;
         break;
 
@@ -1174,11 +1314,17 @@ int ShannonProofSimplifier::add_rule(const Rule& r)
         // I(c|z) + I(a;b|c,z) = I(a,c;b,c|z)
         if (!((a & z) == 0 && (b & z) == 0 && (c & (z | a | b)) == 0 && a > 0 && a <= b && c > 0))
             return -1;
+        if (CmiTriplet(funcs, a, b, c|z, scenario, false) != CmiTriplet(a, b, c|z, scenario))
+            return -1;
         break;
 
     case Rule::MUTUAL_CHAIN:
         // I(a;c|z) + I(a;b|c,z) = I(a;b,c|z)
         if (!((a & z) == 0 && (b & z) == 0 && (c & (z | a | b)) == 0 && a > 0 && b > 0 && c > 0))
+            return -1;
+        if (CmiTriplet(funcs, a, c, z, scenario, false) != CmiTriplet(a, c, z, scenario))
+            return -1;
+        if (CmiTriplet(funcs, a, b|c, z, scenario, false) != CmiTriplet(a, b|c, z, scenario))
             return -1;
         break;
 
@@ -1186,11 +1332,19 @@ int ShannonProofSimplifier::add_rule(const Rule& r)
         // I(a,b|z) >= I(a|c,z)
         if (!((a & z) == 0 && (b & z) == 0 && (a & b) == 0 && (c & (z | a)) == 0 && a > 0))
             return -1;
+        if (CmiTriplet(funcs, a|b, a|b, z, scenario, false) != CmiTriplet(a|b, a|b, z, scenario))
+            return -1;
+        if (apply_implicits(funcs, c|z) != (c|z))
+            return -1;
         break;
 
     case Rule::MONOTONE_MUT:
         // I(a;b,c|z) >= I(a;b|z)
         if (!((a & z) == 0 && (b & z) == 0 && (c & (z | b)) == 0 && a > 0 && b > 0 && (a | b) != a && (a | b) != b))
+            return -1;
+        if (CmiTriplet(funcs, a, b|c, z, scenario, false) != CmiTriplet(a, b|c, z, scenario))
+            return -1;
+        if (CmiTriplet(funcs, a, b, z, scenario, false) != CmiTriplet(a, b, z, scenario))
             return -1;
         break;
 
@@ -1212,7 +1366,7 @@ int ShannonProofSimplifier::add_rule(const Rule& r)
     int indices[5];
     CmiTriplet triplets[5];
     double values[5];
-    int count = r.get_constraint(triplets, values);
+    int count = r.get_constraint(funcs, triplets, values);
     for (int i = 0; i < count; ++i)
         indices[i] = get_row_index(triplets[i]);
 
@@ -1237,7 +1391,8 @@ int ShannonProofSimplifier::get_row_index(CmiTriplet t)
 ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proof_) :
     orig_proof(orig_proof_),
     random_var_names(orig_proof.variables[0].random_var_names),
-    scenario_names(orig_proof.variables[0].scenario_names)
+    scenario_names(orig_proof.variables[0].scenario_names),
+    funcs(orig_proof.variables[0].funcs)
 {
     if (!orig_proof)
         return;
@@ -1295,7 +1450,7 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
                 r = Rule{Rule::CMI_DEF_I, 0, t[0], t[1], t[2], t.scenario};
 
         rule_coefficients[r] = -v;
-        cost += std::abs(v) * r.complexity_cost();
+        cost += std::abs(v) * r.complexity_cost(funcs);
     }
 
     std::cout << "Simplifying from cost " << cost << '\n';
@@ -1608,7 +1763,7 @@ bool ShannonProofSimplifier::simplify(int depth)
     // cols are easy:
     for (auto [r, col] : rule_indices)
     {
-        double cost = r.complexity_cost();
+        double cost = r.complexity_cost(funcs);
         coin.obj[col] += cost;
         if (r.is_equality())
             coin.obj[col + 1] -= cost;
@@ -1757,7 +1912,7 @@ ShannonProofSimplifier::operator SimplifiedShannonProof()
 
         CmiTriplet triplets[5];
         double values[5];
-        int count = r.get_constraint(triplets, values);
+        int count = r.get_constraint(funcs, triplets, values);
         for (int i = 0; i < count; ++i)
             get_row_index(triplets[i]);
 
@@ -1780,7 +1935,7 @@ ShannonProofSimplifier::operator SimplifiedShannonProof()
 
     proof.variables.resize(coin.num_rows);
     for (auto [t, i] : cmi_indices)
-        proof.variables[i] = ExtendedShannonVar{t, &random_var_names, &scenario_names};
+        proof.variables[i] = ExtendedShannonVar{t, &random_var_names, &scenario_names, &funcs};
 
     for (auto [cmi, v] : orig_proof.cmi_objective.entries)
         proof.objective.inc(cmi_indices.at(cmi) + 1, v);
@@ -1814,17 +1969,17 @@ std::ostream& operator<<(std::ostream& out, ExtendedShannonVar t)
 
 void ExtendedShannonRule::print(std::ostream& out, const ExtendedShannonVar* vars, double scale) const
 {
-    const std::vector<std::string>* random_var_names = vars[1].random_var_names;
-    const std::vector<std::string>* scenario_names = vars[1].scenario_names;
-    auto [z, a, b, c] = subsets;
+    const std::vector<std::string>* random_var_names = vars[0].random_var_names;
+    const std::vector<std::string>* scenario_names = vars[0].scenario_names;
+    const std::vector<ImplicitFunctionOf>* funcs = vars[0].funcs;
 
     auto print_cmi = [&] (const CmiTriplet& t) {
-        out << ExtendedShannonVar {t, random_var_names, scenario_names};
+        out << ExtendedShannonVar {t, random_var_names, scenario_names, funcs};
     };
 
     CmiTriplet triplets[5];
     double values[5];
-    int count = get_constraint(triplets, values);
+    int count = get_constraint(*funcs, triplets, values);
 
     for (int i = 0; i < count; ++i)
     {
@@ -1842,6 +1997,8 @@ OrderedSimplifiedShannonProof SimplifiedShannonProof::order() const
 {
     if (!*this)
         return OrderedSimplifiedShannonProof();
+
+    const std::vector<ImplicitFunctionOf>& funcs = *variables[0].funcs;
 
     OsiClpSolverInterface si;
     CoinOsiProblem coin(si, true);
@@ -1872,7 +2029,7 @@ OrderedSimplifiedShannonProof SimplifiedShannonProof::order() const
                 },
                 [&](const ExtendedShannonRule& r)
                 {
-                    return r.get_constraint(triplets, values);
+                    return r.get_constraint(funcs, triplets, values);
                 }
             }, regular_constraints[i - 1]);
 

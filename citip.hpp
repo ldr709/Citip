@@ -105,6 +105,12 @@ typedef SparseVectorT<int> SparseVector;
 typedef MatrixT<int> Matrix;
 
 
+struct ImplicitFunctionOf
+{
+    int func;
+    int of;
+};
+
 // Generic variable -- just an variable number.
 struct LinearVariable {
     int id;
@@ -134,7 +140,7 @@ struct NonNegativityOrOtherRule : public std::variant<NonNegativityRule, Rule> {
     template<typename Var>
     void print(std::ostream& out, const Var* vars, double scale = 1.0) const
     {
-        return std::visit([&](auto&& rule) { return rule.print(out, vars, scale); }, *this);
+        return std::visit([&](const auto& rule) { return rule.print(out, vars, scale); }, *this);
     }
 };
 
@@ -257,7 +263,7 @@ void LinearProof<Var, Rule>::print_step(std::ostream& out, int step, double dual
         out << "0 >= " << -dual_coeff << "\n";
     else if (step <= regular_constraints.size())
     {
-        regular_constraints[step - 1].print(out, variables.data() - 1, dual_coeff);
+        regular_constraints[step - 1].print(out, variables.data(), dual_coeff);
         out << '\n';
     }
     else
@@ -326,22 +332,10 @@ struct CmiTriplet :
     int scenario;
 
     CmiTriplet() = default;
-    CmiTriplet(int a, int b, int c, int scenario_) :
-        std::array<int, 3>{a, b, c},
-        scenario(scenario_)
-    {
-        auto& t = *this;
-        t[0] &= ~t[2];
-        t[1] &= ~t[2];
+    CmiTriplet(int a, int b, int c, int scenario_);
 
-        if (t[0] > t[1])
-            std::swap(t[0], t[1]);
-
-        if ((t[0] | t[1]) == t[1])
-            t[1] = t[0];
-
-        assert(t[0] != 0 && t[1] != 0);
-    }
+    CmiTriplet(const std::vector<ImplicitFunctionOf>& funcs,
+               int a, int b, int c, int scenario_, bool check_nonzero = true);
 
     double complexity_cost() const;
 
@@ -364,6 +358,8 @@ namespace std
 struct ShannonVar {
     const std::vector<std::string>& random_var_names;
     const std::vector<std::string>& scenario_names;
+    const std::map<int, int>& column_map;
+    const std::vector<ImplicitFunctionOf>& funcs;
 
     struct PrintVarsOut {
         const ShannonVar& parent;
@@ -385,6 +381,7 @@ struct ShannonRule : public CmiTriplet {
 struct ExtendedShannonVar : public CmiTriplet {
     const std::vector<std::string>* random_var_names = nullptr;
     const std::vector<std::string>* scenario_names = nullptr;
+    const std::vector<ImplicitFunctionOf>* funcs = nullptr;
 
     friend std::ostream& operator<<(std::ostream&, ExtendedShannonVar);
 };
@@ -416,8 +413,9 @@ struct ExtendedShannonRule
         return type != MONOTONE_COND && type != MONOTONE_MUT;
     }
 
-    int get_constraint(CmiTriplet indices[], double values[]) const;
-    double complexity_cost() const;
+    int get_constraint(const std::vector<ImplicitFunctionOf>& funcs,
+                       CmiTriplet indices[], double values[]) const;
+    double complexity_cost(const std::vector<ImplicitFunctionOf>& funcs) const;
 
     void print(std::ostream& out, const ExtendedShannonVar* vars, double scale = 1.0) const;
 };
@@ -464,16 +462,25 @@ class ShannonTypeProblem
 {
 public:
     ShannonTypeProblem(std::vector<std::string> random_var_names_,
-                       std::vector<std::string> scenario_names_);
+                       std::vector<std::string> scenario_names_,
+                       std::vector<ImplicitFunctionOf> implicit_function_ofs_);
     ShannonTypeProblem(const ParserOutput&);
 
     void add(const SparseVector&, SparseVectorT<CmiTriplet>);
     ShannonTypeProof prove(const SparseVector& I, SparseVectorT<CmiTriplet> cmi_I);
 
 protected:
+    void add_columns();
+    using LinearProblem::add_columns;
+    using LinearProblem::prove;
+    using LinearProblem::check;
+    using LinearProblem::add;
     void add_elemental_inequalities(int num_vars, int num_scenarios);
 
     MatrixT<CmiTriplet> cmi_constraints;
+    std::vector<ImplicitFunctionOf> funcs;
+    std::map<int, int> column_map;
+    std::vector<int> inv_column_map;
 
     const std::vector<std::string> random_var_names;
     const std::vector<std::string> scenario_names;
@@ -507,6 +514,8 @@ class ParserOutput : public ParserCallback
 
     void add_scenario(const std::string&);
     void add_symbols(const ast::VarList&);
+    void add_cmi(SparseVector& v, SparseVectorT<CmiTriplet>& cmi_v,
+                 CmiTriplet t, double coeff) const;
 
     void process_statement(const statement& s);
     void process_relation(const ast::Relation&);
@@ -522,6 +531,7 @@ public:
 
     Matrix inquiries;
     Matrix constraints;
+    std::vector<ImplicitFunctionOf> funcs;
 
     MatrixT<CmiTriplet> cmi_constraints;
     MatrixT<CmiTriplet> cmi_inquiries;

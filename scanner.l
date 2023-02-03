@@ -57,9 +57,10 @@
     yylloc->step();
 %}
 
- /* Keyword for indistinguishable scenarios */
+ /* Keywords */
 
 indist\.                               INT_TOKEN(INDIST, 0)
+implicit                               INT_TOKEN(IMPLICIT, 0)
 
  /* Distinguish between entropies and random variables by checking for a following '('. */
 I[[:alnum:]_]*/\(                      STR_TOKEN_SKIP1(MUTUAL_INFORMATION)
