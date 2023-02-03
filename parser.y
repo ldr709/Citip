@@ -56,8 +56,9 @@
 %type <std::vector<ast::VarList>>       mut_inf_core;
 %type <std::string>                     scenario;
 %type <ast::IndistinguishableScenarios> indist;
+%type <ast::IndistinguishableScenarios> indist_list;
+%type <ast::IndistinguishableScenario>  indist_item;
 %type <ast::VarList>                    scenario_list;
-%type <std::vector<ast::VarList>>       scenario_var_lists;
 
 %start statement
 
@@ -141,17 +142,20 @@ determ_depen      : var_list ':' var_list                       { $$ = {"", $1, 
                   | scenario ';' var_list ':' var_list          { $$ = {$1, $3, $5}; }
                   ;
 
-indist            : INDIST scenario_list ';' scenario_var_lists { $$ = {$2, $4}; }
-                  | INDIST               ';' scenario_var_lists { $$ = {{}, $3}; }
+indist            : INDIST indist_list                          { $$ = $2; }
+                  | INDIST var_list                             { $$ = {{{}, $2}}; }
+                  ;
+
+indist_list       : indist_list ':' indist_item                 { $$ = enlist($1, $3); }
+                  | indist_item                                 { $$ = {$1}; }
+                  ;
+
+indist_item       : scenario_list ';' var_list                  { $$ = {$1, $3}; }
                   ;
 
 scenario_list     : scenario_list ',' scenario                  { $$ = enlist($1, $3); }
-                  | scenario ',' scenario                       { $$ = {$1, $3}; }
+                  | scenario                                    { $$ = {$1}; }
                   ;
-
-scenario_var_lists : scenario_var_lists ':' var_list            { $$ = enlist($1, $3); }
-                   | var_list                                   { $$ = {$1}; }
-                   ;
 
     /* building blocks */
 

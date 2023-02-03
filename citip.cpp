@@ -378,11 +378,13 @@ void ParserOutput::process()
             },
             [&](const ast::IndistinguishableScenarios& is)
             {
-                for (const auto& sc: is.scenarios)
-                    add_scenario(sc);
+                for (const auto& group: is)
+                {
+                    for (const auto& sc: group.scenarios)
+                        add_scenario(sc);
 
-                for (const auto& vl : is.views)
-                    add_symbols(vl);
+                    add_symbols(group.view);
+                }
             }
         }, s);
 
@@ -558,59 +560,85 @@ void ParserOutput::process_function_of(const ast::FunctionOf& fo)
 
 void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
 {
-    const auto& scenario_list = is.scenarios.empty() ? scenario_names : is.scenarios;
     const int dim_per_scenario = (1<<var_names.size()) - 1;
 
     bool is_inquiry = inquiries.empty();
 
-    // Includes redundant pairs of scenarios so that the simplifier can pick the most useful pairs.
-    for (auto it0 = scenario_list.begin(); it0 != scenario_list.end(); ++it0)
+    // Require that all entropies defined by the view match between the scenarios.
+    auto indist_views = [&](int scenario0, const ast::VarList& view0,
+                            int scenario1, const ast::VarList& view1)
     {
-        int scenario0 = scenarios.at(*it0);
-        for (auto it1 = it0 + 1; it1 != scenario_list.end(); ++it1)
+        assert(view0.size() == view1.size());
+
+        int full_set = (1 << view0.size()) - 1;
+
+        auto convert_set = [&](const ast::VarList& view, int set)
         {
-            int scenario1 = scenarios.at(*it1);
+            int out_set = 0;
+            for (int i = 0; i < view.size(); ++i)
+                if ((set >> i) & 1)
+                    out_set |= (1 << get_var_index(view[i]));
+            return out_set;
+        };
 
-            for (const auto& view : is.views)
+        // Redundantly include all pairs of CMIs, rather than just the base entropies, so
+        // that the simplifier can pick the most useful equalities.
+        for (int z : util::disjoint_subsets(0, full_set))
+        {
+            for (int b : util::skip_n(util::disjoint_subsets(z, full_set), 1))
             {
-                int full_set = (1 << var_names.size()) - 1;
-                int view_set = get_set_index(view);
-                int non_view_set = full_set & ~view_set;
-
-                // Require that all entropies defined by the view match between the scenarios.
-                // Redundantly include all pairs of CMIs, rather than just the base entropies, so
-                // that the simplifier can pick the most useful equalities.
-                for (int z : util::disjoint_subsets(non_view_set, full_set))
+                for (int a : util::skip_n(util::disjoint_subsets(z, full_set), 1))
                 {
-                    for (int b : util::skip_n(util::disjoint_subsets(non_view_set | z, full_set), 1))
+                    if (a > b)
+                        break;
+                    if (a != b && (a | b) == b)
+                        continue;
+
+                    SparseVector v;
+                    SparseVectorT<CmiTriplet> cmi_v;
+                    cmi_v.is_equality = v.is_equality = true;
+                    v.inc(scenario0 * dim_per_scenario + convert_set(view0, a|z), 1.0);
+                    v.inc(scenario1 * dim_per_scenario + convert_set(view1, a|z), -1.0);
+                    v.inc(scenario0 * dim_per_scenario + convert_set(view0, b|z), 1.0);
+                    v.inc(scenario1 * dim_per_scenario + convert_set(view1, b|z), -1.0);
+                    v.inc(scenario0 * dim_per_scenario + convert_set(view0, a|b|z), -1.0);
+                    v.inc(scenario1 * dim_per_scenario + convert_set(view1, a|b|z), 1.0);
+                    if (z)
                     {
-                        for (int a : util::skip_n(util::disjoint_subsets(non_view_set | z, full_set), 1))
-                        {
-                            if (a > b)
-                                break;
-                            if (a != b && (a | b) == b)
-                                continue;
-
-                            SparseVector v;
-                            SparseVectorT<CmiTriplet> cmi_v;
-                            cmi_v.is_equality = v.is_equality = true;
-                            v.inc(scenario0 * dim_per_scenario + (a|z), 1.0);
-                            v.inc(scenario1 * dim_per_scenario + (a|z), -1.0);
-                            v.inc(scenario0 * dim_per_scenario + (b|z), 1.0);
-                            v.inc(scenario1 * dim_per_scenario + (b|z), -1.0);
-                            v.inc(scenario0 * dim_per_scenario + (a|b|z), -1.0);
-                            v.inc(scenario1 * dim_per_scenario + (a|b|z), 1.0);
-                            if (z)
-                            {
-                                v.inc(scenario0 * dim_per_scenario + (z), -1.0);
-                                v.inc(scenario1 * dim_per_scenario + (z), 1.0);
-                            }
-
-                            cmi_v.inc(CmiTriplet{a,b,z, scenario0}, 1.0);
-                            cmi_v.inc(CmiTriplet{a,b,z, scenario1}, -1.0);
-                            add_relation(move(v), move(cmi_v), is_inquiry);
-                        }
+                        v.inc(scenario0 * dim_per_scenario + convert_set(view0, z), -1.0);
+                        v.inc(scenario1 * dim_per_scenario + convert_set(view1, z), 1.0);
                     }
+
+                    cmi_v.inc(CmiTriplet{convert_set(view0, a), convert_set(view0, b), convert_set(view0, z), scenario0}, 1.0);
+                    cmi_v.inc(CmiTriplet{convert_set(view1, a), convert_set(view1, b), convert_set(view1, z), scenario1}, -1.0);
+                    add_relation(move(v), move(cmi_v), is_inquiry);
+                }
+            }
+        }
+    };
+
+    // Includes redundant pairs of scenarios so that the simplifier can pick the most useful pairs.
+    int i = 0;
+    for (const auto& group0 : is)
+    {
+        const auto& scenario_list0 = group0.scenarios.empty() ? scenario_names : group0.scenarios;
+        for (const auto& scenario_name0 : scenario_list0)
+        {
+            ++i;
+            int scenario0 = scenarios.at(scenario_name0);
+
+            int j = 0;
+            for (const auto& group1 : is)
+            {
+                const auto& scenario_list1 = group1.scenarios.empty() ? scenario_names : group1.scenarios;
+                for (const auto& scenario_name1 : scenario_list1)
+                {
+                    ++j;
+                    if (i >= j)
+                        continue;
+                    int scenario1 = scenarios.at(scenario_name1);
+
+                    indist_views(scenario0, group0.view, scenario1, group1.view);
                 }
             }
         }

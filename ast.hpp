@@ -69,10 +69,11 @@ namespace ast
 
     // Specifies that each view (a collection of random variables) must be indistinguishable across
     // all scenarios in the list. If scenarios is empty, this instead counts as every scenario.
-    struct IndistinguishableScenarios {
+    struct IndistinguishableScenario {
         std::vector<std::string> scenarios;
-        std::vector<VarList> views;
+        VarList view;
     };
+    typedef std::vector<IndistinguishableScenario> IndistinguishableScenarios;
 }
 
 #endif // include-guard
