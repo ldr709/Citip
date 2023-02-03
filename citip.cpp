@@ -446,7 +446,6 @@ void ParserOutput::process_relation(const ast::Relation& re)
             if (!term.quantity.parts.lists.empty() && term.quantity.parts.scenario == "")
             {
                 has_wildcard_scenario = true;
-                std::cout << "has_wildcard_scenario\n";
                 goto done;
             }
         }
