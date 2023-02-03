@@ -842,6 +842,9 @@ LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_r
 
     coin.load_problem_into_solver(*si);
     //si->writeLp("debug");
+
+    si->setLogLevel(3);
+    si->getModelPtr()->setPerturbation(50);
     si->initialSolve();
 
     if (!si->isProvenOptimal()) {

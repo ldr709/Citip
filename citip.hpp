@@ -18,6 +18,7 @@
 template<class... Ts> struct overload : Ts... { using Ts::operator()...; };
 
 class OsiSolverInterface;
+class OsiClpSolverInterface;
 
 // Coin osi problem, before it's given to a solver.
 struct CoinOsiProblem {
@@ -322,7 +323,7 @@ public:
 protected:
     LinearProof<> prove_impl(const SparseVector& I, int num_regular_rules, bool want_proof);
 
-    std::unique_ptr<OsiSolverInterface> si;
+    std::unique_ptr<OsiClpSolverInterface> si;
     CoinOsiProblem coin;
 };
 
