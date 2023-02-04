@@ -1,6 +1,6 @@
 BUILDDIR = build
 OBJS     = $(addprefix $(BUILDDIR)/,main.o parser.o scanner.o citip.o)
-CPPFLAGS = -MMD -MP
+CPPFLAGS = -MMD -MP -Wfatal-errors
 CXXFLAGS = -std=c++20 -O2 -ggdb -I. -I$(BUILDDIR)
 
 # CBC

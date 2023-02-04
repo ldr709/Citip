@@ -96,7 +96,16 @@ struct SparseVectorT
     }
 
     // increase/decrease component
-    void inc(const T& i, double v) { entries[i] += v; }
+    void inc(const T& i, double v)
+    {
+        auto [it, inserted] = entries.insert({i, v});
+        if (inserted)
+            return;
+
+        it->second += v;
+        if (it->second == 0.0)
+            entries.erase(it);
+    }
 };
 
 template<typename T>
@@ -116,6 +125,8 @@ struct ImplicitFunctionOf
 struct LinearVariable {
     int id;
 
+    bool is_zero() const { return false; }
+
     friend std::ostream& operator<<(std::ostream&, const LinearVariable&);
 };
 
@@ -126,10 +137,14 @@ struct NonNegativityRule {
     int v;
 
     template<typename Var>
-    void print(std::ostream& out, const Var* vars, double scale = 1.0) const
+    bool print(std::ostream& out, const Var* vars, double scale = 1.0) const
     {
+        if (scale == 0.0 || vars[v].is_zero())
+            return false;
+
         print_coeff(out, scale, true);
         out << vars[v] << " >= 0";
+        return true;
     }
 };
 
@@ -139,7 +154,7 @@ struct NonNegativityOrOtherRule : public std::variant<NonNegativityRule, Rule> {
     typedef std::variant<NonNegativityRule, Rule> Parent;
 
     template<typename Var>
-    void print(std::ostream& out, const Var* vars, double scale = 1.0) const
+    bool print(std::ostream& out, const Var* vars, double scale = 1.0) const
     {
         return std::visit([&](const auto& rule) { return rule.print(out, vars, scale); }, *this);
     }
@@ -199,7 +214,7 @@ struct LinearProof
         other.initialized = false;
     }
 
-    inline void print_custom_constraint(std::ostream& out, const SparseVector& constraint,
+    inline bool print_custom_constraint(std::ostream& out, const SparseVector& constraint,
                                         double scale = 1.0) const;
 
     operator bool() const { return initialized; }
@@ -211,7 +226,7 @@ struct LinearProof
 };
 
 template<typename Var, typename Rule>
-void LinearProof<Var, Rule>::print_custom_constraint(
+bool LinearProof<Var, Rule>::print_custom_constraint(
     std::ostream& out, const SparseVector& constraint, double scale) const
 {
     double constant_offset = 0.0;
@@ -224,10 +239,17 @@ void LinearProof<Var, Rule>::print_custom_constraint(
             continue;
         }
 
+        const auto& v = variables[j - 1];
+        if (scale == 0.0 || coeff == 0.0 || v.is_zero())
+            continue;
+
         print_coeff(out, coeff * scale, first);
         first = false;
-        out << variables[j - 1];
+        out << v;
     }
+
+    if (first)
+        return false;
 
     if (constraint.is_equality)
         out << " == ";
@@ -236,6 +258,7 @@ void LinearProof<Var, Rule>::print_custom_constraint(
     if (constant_offset == 0.0)
         constant_offset = -0.0; // Print "0" instead of "-0"
     out << -constant_offset;
+    return true;
 }
 
 template<typename Var, typename Rule>
@@ -264,14 +287,14 @@ void LinearProof<Var, Rule>::print_step(std::ostream& out, int step, double dual
         out << "0 >= " << -dual_coeff << "\n";
     else if (step <= regular_constraints.size())
     {
-        regular_constraints[step - 1].print(out, variables.data(), dual_coeff);
-        out << '\n';
+        if (regular_constraints[step - 1].print(out, variables.data(), dual_coeff))
+            out << '\n';
     }
     else
     {
         int j = step - regular_constraints.size() - 1;
-        print_custom_constraint(out, custom_constraints[j], dual_coeff);
-        out << '\n';
+        if (print_custom_constraint(out, custom_constraints[j], dual_coeff))
+            out << '\n';
     }
 }
 
@@ -333,11 +356,13 @@ struct CmiTriplet :
     int scenario;
 
     CmiTriplet() = default;
-    CmiTriplet(int a, int b, int c, int scenario_);
+    CmiTriplet(int a, int b, int c, int scenario_) :
+        CmiTriplet(std::vector<ImplicitFunctionOf>(), a, b, c, scenario_) {}
 
     CmiTriplet(const std::vector<ImplicitFunctionOf>& funcs,
-               int a, int b, int c, int scenario_, bool check_nonzero = true);
+               int a, int b, int c, int scenario_);
 
+    bool is_zero() const;
     double complexity_cost() const;
 
     friend auto operator<=>(const CmiTriplet& a, const CmiTriplet& b) = default;
@@ -371,12 +396,14 @@ struct ShannonVar {
     PrintVarsOut print_vars() const { return PrintVarsOut{*this}; }
     const std::string& scenario() const;
 
+    bool is_zero() const { return v == 0; }
+
     int v;
     friend std::ostream& operator<<(std::ostream&, const ShannonVar&);
 };
 
 struct ShannonRule : public CmiTriplet {
-    void print(std::ostream&, const ShannonVar* vars, double scale = 1.0) const;
+    bool print(std::ostream&, const ShannonVar* vars, double scale = 1.0) const;
 };
 
 struct ExtendedShannonVar : public CmiTriplet {
@@ -393,8 +420,6 @@ struct ExtendedShannonRule
     enum type_enum
     {
         CMI_DEF_I,
-        MI_DEF_I,
-        MI_DEF_CI,
 
         CHAIN,
         MUTUAL_CHAIN,
@@ -402,6 +427,13 @@ struct ExtendedShannonRule
         MONOTONE_COND,
         MONOTONE_MUT,
     };
+
+    ExtendedShannonRule() = default;
+    ExtendedShannonRule(type_enum type, int z, int a, int b, int c, int scenario_) :
+        ExtendedShannonRule(std::vector<ImplicitFunctionOf>(), type, z, a, b, c, scenario_) {}
+
+    ExtendedShannonRule(const std::vector<ImplicitFunctionOf>& funcs, type_enum type_,
+                        int z, int a, int b, int c, int scenario_);
 
     type_enum type;
     std::array<int, 4> subsets;
@@ -414,11 +446,13 @@ struct ExtendedShannonRule
         return type != MONOTONE_COND && type != MONOTONE_MUT;
     }
 
-    int get_constraint(const std::vector<ImplicitFunctionOf>& funcs,
-                       CmiTriplet indices[], double values[]) const;
+    bool is_trivial(const SparseVectorT<CmiTriplet>& c) const;
+    bool is_trivial(const std::vector<ImplicitFunctionOf>& funcs) const;
+
+    SparseVectorT<CmiTriplet> get_constraint(const std::vector<ImplicitFunctionOf>& funcs) const;
     double complexity_cost(const std::vector<ImplicitFunctionOf>& funcs) const;
 
-    void print(std::ostream& out, const ExtendedShannonVar* vars, double scale = 1.0) const;
+    bool print(std::ostream& out, const ExtendedShannonVar* vars, double scale = 1.0) const;
 };
 
 struct OrderedSimplifiedShannonProof;
