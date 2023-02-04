@@ -601,6 +601,7 @@ void ParserOutput::process_mutual_independence(const ast::MutualIndependence& mi
 
     bool is_inquiry = inquiries.empty();
 
+    // TODO: Add rules for other formulations of independence, for proof simplification.
     for (int scenario = first_scenario; scenario < last_scenario; ++scenario)
     {
         // 0 = H(a) + H(b) + H(c) + … - H(a,b,c,…)
@@ -694,6 +695,7 @@ void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
 
         // Redundantly include all pairs of CMIs, rather than just the base entropies, so
         // that the simplifier can pick the most useful equalities.
+        // TODO: only do this for simplify.
         for (int z : util::disjoint_subsets(0, full_set))
         {
             if (z != apply_implicits(funcs, z))
@@ -1031,13 +1033,20 @@ void ShannonRule::print(std::ostream& out, const ShannonVar* vars, double scale)
     print_coeff(out, scale, true);
 
     auto& scenario_names = vars[0].scenario_names;
-    auto& column_map = vars[0].column_map;
 
-    out << 'H' << scenario_names[scenario] << '(' << vars[column_map.at(a)].print_vars();
+    // Don't bother finding the original variables.
+    ShannonVar va = vars[0];
+    ShannonVar vb = vars[0];
+    ShannonVar vz = vars[0];
+    va.v = a;
+    vb.v = b;
+    vz.v = z;
+
+    out << 'H' << scenario_names[scenario] << '(' << va.print_vars();
     if (a != b)
-        out << "; " << vars[column_map.at(b)].print_vars();
+        out << "; " << vb.print_vars();
     if (z != 0)
-        out << " | " << vars[column_map.at(z)].print_vars();
+        out << " | " << vz.print_vars();
     out << ") >= 0";
 }
 
@@ -1158,8 +1167,8 @@ SimplifiedShannonProof ShannonTypeProof::simplify(int depth) const
 //
 // Equality:
 // CMI defn. 1                    I(a;b|c,z) = I(a,c|z) + I(b,c|z) - I(a,b,c|z) - I(c|z)
-// CMI defn. 2                    I(a;b|z) = I(a|z) + I(b|z) - I(a,b|z)
-// CMI defn. 3                    I(a;b|z) = I(a|z) - I(a|b,z)
+// CMI defn. 2                    I(a;b|z) = I(a|z) + I(b|z) - I(a,b|z) (Same as defn. 1 with c=0)
+// CMI defn. 3                    I(a;b|z) = I(a|z) - I(a|b,z) (Same as MI chain with c->b and b->a)
 // chain rule:                    I(c|z) + I(a;b|c,z) = I(a,c;b,c|z)
 // mutual information chain rule: I(a;c|z) + I(a;b|c,z) = I(a;b,c|z)
 //
@@ -1944,6 +1953,8 @@ ShannonProofSimplifier::operator SimplifiedShannonProof()
     for (auto [t, i] : cmi_indices)
         proof.variables[i] = ExtendedShannonVar{t, &random_var_names, &scenario_names, &funcs};
 
+    if (orig_proof.objective.get(0) != 0.0)
+        proof.objective.inc(0, orig_proof.objective.get(0));
     for (auto [cmi, v] : orig_proof.cmi_objective.entries)
         proof.objective.inc(cmi_indices.at(cmi) + 1, v);
 
