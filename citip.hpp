@@ -475,6 +475,7 @@ struct ShannonTypeProof : public LinearProof<ShannonVar, ShannonRule>
 
     // Save these in case simplify() is run.
     MatrixT<CmiTriplet> cmi_constraints;
+    MatrixT<CmiTriplet> cmi_constraints_redundant;
     SparseVectorT<CmiTriplet> cmi_objective;
 };
 
@@ -498,7 +499,8 @@ class ShannonTypeProblem
 public:
     ShannonTypeProblem(std::vector<std::string> random_var_names_,
                        std::vector<std::string> scenario_names_,
-                       std::vector<ImplicitFunctionOf> implicit_function_ofs_);
+                       std::vector<ImplicitFunctionOf> implicit_function_ofs_,
+                       std::vector<SparseVectorT<CmiTriplet>> cmi_constraints_redundant_);
     ShannonTypeProblem(const ParserOutput&);
 
     void add(const SparseVector&, SparseVectorT<CmiTriplet>);
@@ -513,6 +515,7 @@ protected:
     void add_elemental_inequalities(int num_vars, int num_scenarios);
 
     MatrixT<CmiTriplet> cmi_constraints;
+    MatrixT<CmiTriplet> cmi_constraints_redundant;
     std::vector<ImplicitFunctionOf> funcs;
     std::map<int, int> column_map;
     std::vector<int> inv_column_map;
@@ -570,6 +573,9 @@ public:
 
     MatrixT<CmiTriplet> cmi_constraints;
     MatrixT<CmiTriplet> cmi_inquiries;
+
+    // Redundant constraints that can be used for proof simplification.
+    MatrixT<CmiTriplet> cmi_constraints_redundant;
 
     void process();
 
