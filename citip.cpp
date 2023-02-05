@@ -611,6 +611,8 @@ void ParserOutput::process_mutual_independence(const ast::MutualIndependence& mi
         add_relation(move(v), move(cmi_v), is_inquiry);
 
         // Add redundant rules for other formulations of independence, for proof simplification.
+        // CMI(a ; b | z) = 0 for disjoint a, b, z among the independent variables.
+
         auto convert_set = [&](int set)
         {
             int out_set = 0;
@@ -623,9 +625,16 @@ void ParserOutput::process_mutual_independence(const ast::MutualIndependence& mi
         // Avoid adding duplicate rules.
         std::set<CmiTriplet> added_rules;
 
-        // CMI(a ; b | z) = 0 for disjoint a, b, z among the independent variables.
         int full_set = (1 << set_indices.size()) - 1;
-        for (int z : util::disjoint_subsets(0, full_set))
+
+        // Skip z > 0 when this would make the set of constraints way too big.
+        int max_z = (set_indices.size() > 5 ? 0 : full_set);
+
+        // Skip the redundant constraints entirely if there's way too many.
+        if (set_indices.size() > 13)
+            continue;
+
+        for (int z = 0; z <= max_z; ++z)
         {
             for (int b : util::skip_n(util::disjoint_subsets(z, full_set), 1))
             {
@@ -748,9 +757,16 @@ void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
         // Avoid adding redundant rules.
         std::set<std::array<int, 6>> added_rules;
 
+        // Skip z > 0 when this would make the set of constraints way too big.
+        int max_z = (view0.size() > 6 ? 0 : full_set);
+
+        // Skip the redundant constraints entirely if there's way too many.
+        if (view0.size() > 14)
+            return;
+
         // Redundantly include all pairs of CMIs, rather than just the base entropies, so
         // that the simplifier can pick the most useful equalities.
-        for (int z : util::disjoint_subsets(0, full_set))
+        for (int z = 0; z <= max_z; ++z)
         {
             for (int b : util::skip_n(util::disjoint_subsets(z, full_set), 1))
             {
