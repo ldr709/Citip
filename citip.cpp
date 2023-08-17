@@ -1005,7 +1005,7 @@ void print_coeff(std::ostream& out, double c, bool first)
 
 std::ostream& operator<<(std::ostream& out, const LinearVariable& v)
 {
-    out << 'v' << v;
+    out << 'v' << v.id;
     return out;
 }
 
@@ -1071,6 +1071,9 @@ LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_r
 
         if (!want_proof)
             return proof;
+
+        const double* si_solution = si->getColSolution();
+        proof.primal_solution = std::vector<double>(si_solution, si_solution + coin.num_cols);
 
         proof.objective = I;
         proof.objective.is_equality = false;

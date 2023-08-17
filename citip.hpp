@@ -8,6 +8,7 @@
 # include <array>
 # include <algorithm>
 # include <functional>
+# include <fstream>
 # include <memory>
 
 # include <coin/CoinPackedMatrix.hpp>
@@ -186,6 +187,9 @@ struct LinearProof
     // regular_constraints.size() + custom_constraints.size(): custom constraints.
     SparseVector dual_solution;
 
+    // Values of the variables for the optimal solution. Might be helpful for proof simplification.
+    std::vector<double> primal_solution;
+
     // The variables the constraints are defined over.
     std::vector<Var> variables;
 
@@ -212,6 +216,7 @@ struct LinearProof
     LinearProof(LinearProof<Var2, Rule2> other, Func1&& map_vars, Func2&& map_rules) :
         initialized(other.initialized),
         dual_solution(std::move(other.dual_solution)),
+        primal_solution(std::move(other.primal_solution)),
         custom_constraints(std::move(other.custom_constraints)),
         objective(std::move(other.objective))
     {
@@ -223,6 +228,13 @@ struct LinearProof
         std::transform(other.regular_constraints.begin(), other.regular_constraints.end(),
                        std::back_inserter(regular_constraints), std::forward<Func2>(map_rules));
         other.initialized = false;
+
+        if (false)
+        {
+            std::ofstream solution_file("primal_solution.txt");
+            for (int i = 0; i < variables.size(); ++i)
+                solution_file << variables[i] << ": " << primal_solution[i] << '\n';
+        }
     }
 
     inline bool print_custom_constraint(std::ostream& out, const SparseVector& constraint,
