@@ -58,23 +58,23 @@ namespace util
         return '"' + str + '"';
     }
 
-    class disjoint_subsets
+    struct disjoint_subsets
     {
-        unsigned int disjoint_from;
-        unsigned int universe;
+        const unsigned int disjoint_from;
 
-    public:
         disjoint_subsets(unsigned int disjoint_from_, unsigned int universe_) :
-            disjoint_from(disjoint_from_), universe(universe_) {}
+            disjoint_from(disjoint_from_ | ~universe_) {}
 
         class iterator
         {
-            friend class disjoint_subsets;
+        private:
+            friend struct disjoint_subsets;
 
-            unsigned int disjoint_from = -1;
+            unsigned int m_disjoint_from = -1;
             unsigned int i = 0;
+            bool done = false;
             iterator(const disjoint_subsets& x) :
-                disjoint_from(x.disjoint_from), i(x.disjoint_from), tmp(0) {}
+                m_disjoint_from(x.disjoint_from), i(x.disjoint_from), tmp(0) {}
 
             // Temporary location for dereferenced value in operator->().
             mutable unsigned int tmp = 0;
@@ -88,7 +88,7 @@ namespace util
             using pointer = value_type*;
             using reference = value_type&;
 
-            value_type operator*() const { return i & ~disjoint_from; }
+            value_type operator*() const { return i & ~disjoint_from(); }
             pointer operator->() const
             {
                 tmp = **this;
@@ -97,7 +97,10 @@ namespace util
 
             iterator& operator++()
             {
-                i = (i + 1) | disjoint_from;
+                if (is_last())
+                    done = true;
+                else
+                    i = (i + 1) | disjoint_from();
                 return *this;
             }
 
@@ -106,6 +109,16 @@ namespace util
                 iterator tmp = *this;
                 ++*this;
                 return tmp;
+            }
+
+            bool is_last()
+            {
+                return i == (unsigned int) -1;
+            }
+
+            unsigned int disjoint_from() const
+            {
+                return m_disjoint_from;
             }
 
             friend auto operator<=>(const iterator& a, const iterator& b) = default;
@@ -119,7 +132,7 @@ namespace util
         iterator end() const
         {
             iterator out(*this);
-            out.i = universe;
+            out.i = (unsigned int) -1;;
             return ++out;
         }
     };
@@ -130,6 +143,102 @@ namespace util
     }
 
     static_assert(std::forward_iterator<disjoint_subsets::iterator>);
+
+    struct partitions
+    {
+        const unsigned int n;
+
+        partitions(unsigned int n_) : n(n_) {}
+
+        class iterator
+        {
+            friend struct partitions;
+
+            unsigned int n = 0;
+            std::vector<unsigned int> sets;
+            std::vector<disjoint_subsets::iterator> iterators;
+
+            void setup_remaining_sets()
+            {
+                unsigned int universe = (1 << n) - 1;
+
+                unsigned int disjoint_from = 0;
+                if (!iterators.empty())
+                    disjoint_from = iterators.back().disjoint_from() | sets.back();
+
+                for (unsigned int i = 0; i < n; ++i)
+                {
+                    if (disjoint_from & (1 << i))
+                        continue;
+                    sets.push_back(1 << i);
+                    disjoint_from |= 1 << i;
+                    iterators.push_back(disjoint_subsets(disjoint_from, universe).begin());
+                }
+            }
+
+            iterator(const partitions& x, bool at_end = false) : n(x.n)
+            {
+                if (!at_end)
+                    setup_remaining_sets();
+            }
+
+        public:
+            iterator() = default;
+
+            using iterator_category = std::input_iterator_tag;
+            using difference_type = int;
+            using value_type = const std::vector<unsigned int>;
+            using pointer = value_type*;
+            using reference = value_type&;
+
+            reference operator*() const { return sets; }
+            pointer operator->() const
+            {
+                return &sets;
+            }
+
+            iterator& operator++()
+            {
+                while (!iterators.empty() && iterators.back().is_last())
+                {
+                    sets.pop_back();
+                    iterators.pop_back();
+                }
+
+                if (!iterators.empty())
+                {
+                    sets.back() &= ~*iterators.back();
+                    sets.back() |= *++iterators.back();
+
+                    setup_remaining_sets();
+                }
+
+                return *this;
+            }
+
+            iterator operator++(int)
+            {
+                iterator tmp = *this;
+                ++*this;
+                return tmp;
+            }
+
+            friend bool operator==(const iterator& a, const iterator& b) = default;
+            friend bool operator!=(const iterator& a, const iterator& b) = default;
+        };
+
+        iterator begin() const
+        {
+            return iterator(*this);
+        }
+
+        iterator end() const
+        {
+            return iterator(*this, true);
+        }
+    };
+
+    static_assert(std::input_iterator<partitions::iterator>);
 
     template<typename Range>
     class skip_n_range

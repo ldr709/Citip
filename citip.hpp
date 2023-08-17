@@ -121,6 +121,17 @@ struct ImplicitFunctionOf
     int of;
 };
 
+struct ImplicitIndependence
+{
+    int set;
+    int indep_from;
+};
+
+struct ImplicitRules {
+    std::vector<ImplicitFunctionOf> funcs;
+    std::vector<ImplicitIndependence> indeps;
+};
+
 // Generic variable -- just an variable number.
 struct LinearVariable {
     int id;
@@ -357,9 +368,9 @@ struct CmiTriplet :
 
     CmiTriplet() = default;
     CmiTriplet(int a, int b, int c, int scenario_) :
-        CmiTriplet(std::vector<ImplicitFunctionOf>(), a, b, c, scenario_) {}
+        CmiTriplet(ImplicitRules(), a, b, c, scenario_) {}
 
-    CmiTriplet(const std::vector<ImplicitFunctionOf>& funcs,
+    CmiTriplet(const ImplicitRules& implicits,
                int a, int b, int c, int scenario_);
 
     bool is_zero() const;
@@ -385,7 +396,7 @@ struct ShannonVar {
     const std::vector<std::string>& random_var_names;
     const std::vector<std::string>& scenario_names;
     const std::map<int, int>& column_map;
-    const std::vector<ImplicitFunctionOf>& funcs;
+    const ImplicitRules& implicits;
 
     struct PrintVarsOut {
         const ShannonVar& parent;
@@ -409,7 +420,7 @@ struct ShannonRule : public CmiTriplet {
 struct ExtendedShannonVar : public CmiTriplet {
     const std::vector<std::string>* random_var_names = nullptr;
     const std::vector<std::string>* scenario_names = nullptr;
-    const std::vector<ImplicitFunctionOf>* funcs = nullptr;
+    const ImplicitRules* implicits = nullptr;
 
     friend std::ostream& operator<<(std::ostream&, ExtendedShannonVar);
 };
@@ -430,9 +441,9 @@ struct ExtendedShannonRule
 
     ExtendedShannonRule() = default;
     ExtendedShannonRule(type_enum type, int z, int a, int b, int c, int scenario_) :
-        ExtendedShannonRule(std::vector<ImplicitFunctionOf>(), type, z, a, b, c, scenario_) {}
+        ExtendedShannonRule(ImplicitRules(), type, z, a, b, c, scenario_) {}
 
-    ExtendedShannonRule(const std::vector<ImplicitFunctionOf>& funcs, type_enum type_,
+    ExtendedShannonRule(const ImplicitRules& implicits, type_enum type_,
                         int z, int a, int b, int c, int scenario_);
 
     type_enum type;
@@ -447,10 +458,10 @@ struct ExtendedShannonRule
     }
 
     bool is_trivial(const SparseVectorT<CmiTriplet>& c) const;
-    bool is_trivial(const std::vector<ImplicitFunctionOf>& funcs) const;
+    bool is_trivial(const ImplicitRules& implicits) const;
 
-    SparseVectorT<CmiTriplet> get_constraint(const std::vector<ImplicitFunctionOf>& funcs) const;
-    double complexity_cost(const std::vector<ImplicitFunctionOf>& funcs) const;
+    SparseVectorT<CmiTriplet> get_constraint(const ImplicitRules& implicits) const;
+    double complexity_cost(const ImplicitRules& implicits) const;
 
     bool print(std::ostream& out, const ExtendedShannonVar* vars, double scale = 1.0) const;
 };
@@ -499,7 +510,7 @@ class ShannonTypeProblem
 public:
     ShannonTypeProblem(std::vector<std::string> random_var_names_,
                        std::vector<std::string> scenario_names_,
-                       std::vector<ImplicitFunctionOf> implicit_function_ofs_,
+                       ImplicitRules implicit_function_ofs_,
                        std::vector<SparseVectorT<CmiTriplet>> cmi_constraints_redundant_);
     ShannonTypeProblem(const ParserOutput&);
 
@@ -516,7 +527,7 @@ protected:
 
     MatrixT<CmiTriplet> cmi_constraints;
     MatrixT<CmiTriplet> cmi_constraints_redundant;
-    std::vector<ImplicitFunctionOf> funcs;
+    ImplicitRules implicits;
     std::map<int, int> column_map;
     std::vector<int> inv_column_map;
 
@@ -569,7 +580,7 @@ public:
 
     Matrix inquiries;
     Matrix constraints;
-    std::vector<ImplicitFunctionOf> funcs;
+    ImplicitRules implicits;
 
     MatrixT<CmiTriplet> cmi_constraints;
     MatrixT<CmiTriplet> cmi_inquiries;

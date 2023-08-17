@@ -59,7 +59,12 @@ namespace ast
         Expression right;
     };
 
-    typedef VarCore MutualIndependence;
+    struct MutualIndependence
+    {
+        VarCore sets;
+        bool implicit;
+    };
+
     typedef VarCore MarkovChain;
 
     struct FunctionOf {
