@@ -1266,6 +1266,7 @@ ShannonTypeProof ShannonTypeProblem::prove(const SparseVector& I,
 // Simplify the Shannon bounds in a proof by combining them into conditional mutual informations.
 struct ShannonProofSimplifier
 {
+    friend struct ExtendedShannonRule;
     typedef ExtendedShannonRule Rule;
 
     ShannonProofSimplifier() = delete;
@@ -1281,7 +1282,7 @@ private:
     void add_adjacent_rules(CmiTriplet);
     void add_adjacent_rules_quadratic(CmiTriplet);
 
-    double custom_rule_complexity_cost(const SparseVectorT<CmiTriplet>&) const;
+    static double custom_rule_complexity_cost(const SparseVectorT<CmiTriplet>&);
 
     // How much to use each type of (in)equality:
     std::map<CmiTriplet, double> cmi_coefficients;
@@ -1431,6 +1432,7 @@ ExtendedShannonRule::ExtendedShannonRule(const ImplicitRules& implicits, type_en
     subsets = {z, a, b, c};
 }
 
+const double rule_cost                           = 1.0;
 const double information_cost                    = 1.0;
 const double conditional_information_cost        = 1.1;
 const double mutual_information_cost             = 1.5;
@@ -1440,7 +1442,8 @@ const double conditional_mutual_information_cost = 1.6;
 double CmiTriplet::complexity_cost() const
 {
     if (is_zero())
-        return 0.0;
+        // Give a reason to avoid using rules with trivial terms, if other alternatives exist.
+        return 0.01;
 
     const CmiTriplet& t = *this;
     if (t[0] == t[1])
@@ -1457,24 +1460,17 @@ double CmiTriplet::complexity_cost() const
 
 double ExtendedShannonRule::complexity_cost(const ImplicitRules& implicits) const
 {
-    double cost = 0.0;
-    auto c = get_constraint(implicits);
-
-    for (const auto& [cmi, v] : c.entries)
-        cost += cmi.complexity_cost();
-
-    // Give a reason to avoid using trivial rules.
-    return std::max(cost, 0.1);
+    return ShannonProofSimplifier::custom_rule_complexity_cost(get_constraint(implicits));
 }
 
-double ShannonProofSimplifier::custom_rule_complexity_cost(const SparseVectorT<CmiTriplet>& c) const
+double ShannonProofSimplifier::custom_rule_complexity_cost(const SparseVectorT<CmiTriplet>& c)
 {
     double cost = 0.0;
     for (const auto& [cmi, v] : c.entries)
         cost += cmi.complexity_cost();
 
-    // Give a reason to avoid using trivial rules.
-    return std::max(cost, 0.1);
+    // Cost for adding more rules, even if they are simple.
+    return cost + rule_cost;
 }
 
 bool ExtendedShannonRule::is_trivial(const SparseVectorT<CmiTriplet>& c) const
@@ -1632,7 +1628,7 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
             cmi_coefficients[c] = coeff;
             cmi_usage.inc(c, coeff);
 
-            cost += coeff * std::max(0.1, c.complexity_cost()); // Give a reason to avoid using trivial rules.
+            cost += coeff * (c.complexity_cost() + rule_cost);
         }
         else
         {
@@ -1926,7 +1922,7 @@ bool ShannonProofSimplifier::simplify(int depth)
     std::vector<double> row_obj(coin.num_rows, 0.0);
     for (auto [t, row] : cmi_indices)
     {
-        double cost = t.complexity_cost();
+        double cost = t.complexity_cost() + rule_cost;
         row_obj[row] -= cost;
         obj_offset += cost * coin.rowub[row];
     }
@@ -2303,6 +2299,10 @@ OrderedSimplifiedShannonProof SimplifiedShannonProof::order() const
         }
     }
 
+    // TODO: Maybe better to all variations in the scale at which each rule is used, as long as only
+    // 1 rule is used at a time. That way this optimization could simplify cases where two different
+    // proofs got mixed together.
+
     // Variables for each step and term (except for the last), for whether the term is present in
     // the partial sum after this step. The objective is to minimize these variables.
     const int nonzero_partial_sums_start = coin.num_cols;
@@ -2437,7 +2437,7 @@ OrderedSimplifiedShannonProof SimplifiedShannonProof::order() const
     std::filesystem::remove_all(temp_dir);
 
     if (!succeeded) {
-        throw std::runtime_error("LinearProblem: Failed to solve LP.");
+        throw std::runtime_error("OrderedSimplifiedShannonProof: Failed to solve ILP.");
     }
 
     std::cout << "Reordered to cost " << obj << '\n';
