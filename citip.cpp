@@ -13,6 +13,8 @@
 #include <scip/scip.h>
 #include <scip/scipdefplugins.h>
 
+#include <boost/heap/fibonacci_heap.hpp>
+
 #include "citip.hpp"
 #include "parser.hxx"
 #include "scanner.hpp"
@@ -956,6 +958,9 @@ LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_r
         proof.objective = I;
         proof.objective.is_equality = false;
 
+        const double* primal_sol = si->getColSolution();
+        proof.primal_solution.insert(proof.primal_solution.end(), primal_sol, primal_sol + coin.num_cols);
+
         double const_term = si->getObjValue() + I.get(0);
         if (std::abs(const_term) > eps)
             proof.dual_solution.entries[0] = const_term;
@@ -1145,6 +1150,7 @@ ShannonTypeProof ShannonTypeProblem::prove(const SparseVector& I,
 struct ShannonProofSimplifier
 {
     typedef ExtendedShannonRule Rule;
+    typedef std::variant<Rule, int> RuleOrCustom;
 
     ShannonProofSimplifier() = delete;
     ShannonProofSimplifier(const ShannonTypeProof&);
@@ -1161,29 +1167,172 @@ private:
 
     double custom_rule_complexity_cost(const SparseVectorT<CmiTriplet>&) const;
 
+    struct RuleMetadata;
+
+    typedef std::tuple<double, RuleMetadata*> HeapElem;
+    typedef boost::heap::fibonacci_heap<HeapElem,
+        boost::heap::compare<std::greater<HeapElem>>> Heap; // Min heap.
+
+    struct CmiMetadata
+    {
+        int row_index = -1;
+
+        CmiMetadata(const CmiTriplet& cmi);
+
+        const double cost_of_cmi_to_ent_rule;
+
+        // Any CMI not yet added to the problem will have only degenerate rules mentioning it. This
+        // means that it's price is multi-valued. The heap is to track the lowest cost to add a
+        // +I(...) term (index 0), and the lowest cost of adding a -I(...) term (index 1). Note:
+        // these are the prices of adding terms from *somewhere*, not the cost of canceling out a
+        // term (to get this, swap indices 0 and 1).
+        Heap adjacent_rules[2];
+
+        // Price, if this rule has already been added to the solver.
+        double price = NAN;
+
+        std::array<double, 2> get_prices(const CmiTriplet& cmi,
+                                         const std::vector<ImplicitFunctionOf>& funcs) const;
+        static double default_price(const CmiTriplet& cmi,
+                                    const std::vector<ImplicitFunctionOf>& funcs);
+    };
+
+    struct RuleMetadata
+    {
+        RuleMetadata(const Rule& r, const ShannonProofSimplifier& simp);
+
+        int col_index = -1;
+
+        const double cost;
+
+        int term_count;
+        CmiTriplet cmis[5] = {};
+        double coeffs[5] = {0};
+        CmiMetadata* cmi_metadatas[5] = {nullptr};
+
+        int queue_entries_present = 0; // Bit field.
+        Heap::handle_type queue_entries[5];
+
+        int price_updates_since_last_change = 0;
+
+        // Returns true if any CmiMetadata prices were updated. If negative then do it for the
+        // negative version of an equality rule.
+        bool recompute_prices(ShannonProofSimplifier& simp, bool negative);
+    };
+
+    std::map<CmiTriplet, CmiMetadata> cmi_metadata;
+    std::map<RuleOrCustom, RuleMetadata> rule_metadata;
+
+    OsiClpSolverInterface si;
+    CoinOsiProblem coin;
+
+    void update_prices(const double* new_prices);
+    RuleMetadata* try_rule(const Rule& r);
+    void add_rule(const Rule& r, RuleMetadata* m);
+
+    CmiMetadata& add_cmi_metadata(CmiTriplet cmi);
+
     // How much to use each type of (in)equality:
     std::map<CmiTriplet, double> cmi_coefficients;
     std::map<Rule, double> rule_coefficients;
     std::map<int, double> custom_rule_coefficients;
 
-    double cost;
+    double total_cost;
 
     const ShannonTypeProof& orig_proof;
     MatrixT<CmiTriplet> cmi_constraints;
 
-    std::map<CmiTriplet, int> cmi_indices; // rows represent conditional mutual informations.
     int get_row_index(CmiTriplet t);
 
-    std::map<Rule, int> rule_indices;
-    int add_rule(const Rule& r);
     int add_constraint(const SparseVectorT<CmiTriplet>& c, double cost = 0.0);
-
-    CoinOsiProblem coin;
 
     const std::vector<ImplicitFunctionOf>& funcs;
     const std::vector<std::string>& random_var_names;
     const std::vector<std::string>& scenario_names;
 };
+
+std::array<double, 2> ShannonProofSimplifier::CmiMetadata::get_prices(
+    const CmiTriplet& cmi, const std::vector<ImplicitFunctionOf>& funcs) const
+{
+    if (row_index == -1)
+    {
+        std::array<double, 2> out;
+        for (int i = 0; i < 2; ++i)
+        {
+            auto& heap = adjacent_rules[i];
+            if (heap.empty())
+                out[i] = default_price(cmi, funcs);
+            else
+                out[i] = std::get<double>(heap.top());
+        }
+        return out;
+    }
+    else
+        return {price, price};
+}
+
+static double ShannonProofSimplifier::CmiMetadata::default_price(
+    const CmiTriplet& cmi, const std::vector<ImplicitFunctionOf>& funcs)
+{
+    Rule r{funcs, Rule::CMI_DEF_I, 0, cmi[0], cmi[1], cmi[2], cmi.scenario};
+    return r.complexity_cost(funcs);
+}
+
+ShannonProofSimplifier::RuleMetadata::RuleMetadata(
+    const Rule &r, const ShannonProofSimplifier& simp) :
+    cost(r.complexity_cost(simp.funcs))
+{
+    auto c = get_constraint(funcs);
+    for (const auto& [cmi, v] : c.entries)
+    {
+        cmis[term_count] = cmi;
+        coeffs[term_count] = v;
+
+        auto it = simp.cmi_metadata.find(cmi);
+        if (it == simp.cmi_metadata.end())
+            cmi_metadatas[term_count] = nullptr;
+        else
+            cmi_metadatas[term_count] = &*it;
+
+        ++term_count;
+    }
+}
+
+bool ShannonProofSimplifier::RuleMetadata::recompute_prices(ShannonProofSimplifier& simp)
+{
+    if (price_updates_since_last_change >= TODO)
+    {
+    }
+
+    price_updates_since_last_change++;
+
+    std::array<double, 2> row_prices[5];
+    for (int i = 0; i < term_count; ++i)
+    {
+        CmiTriplet cmi = cmis[i];
+        CmiMetadata* cmi_meta = cmi_metadatas[i];
+        if (!cmi_meta)
+        {
+            auto it = simp.cmi_metadata.find(cmi);
+            if (it != simp.cmi_metadata.end())
+                cmi_metadatas[i] = cmi_meta = &*it;
+            else
+            {
+                double default_p = CmiMetadata::default_price(cmi, simp.funcs);
+                row_prices[i] = {default_p, default_p};
+                continue;
+            }
+        }
+
+        row_prices[i] = cmi_meta->get_price(cmi, simp.funcs);
+    }
+
+    double profit = -cost;
+    for (int i = 0; i < term_count; ++i)
+    {
+        double v = coeffs[i];
+    }
+}
 
 SimplifiedShannonProof ShannonTypeProof::simplify(int depth) const
 {
@@ -1487,7 +1636,9 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
     random_var_names(orig_proof.variables[0].random_var_names),
     scenario_names(orig_proof.variables[0].scenario_names),
     funcs(orig_proof.variables[0].funcs),
-    cmi_constraints(orig_proof.cmi_constraints)
+    cmi_constraints(orig_proof.cmi_constraints),
+    si(),
+    coin(si)
 {
     if (!orig_proof)
         return;
@@ -1495,7 +1646,7 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
     cmi_constraints.insert(cmi_constraints.end(), orig_proof.cmi_constraints_redundant.begin(),
                            orig_proof.cmi_constraints_redundant.end());
 
-    cost = 0.0;
+    total_cost = 0.0;
 
     // Translate the old proof into CMI notation.
     SparseVectorT<CmiTriplet> cmi_usage;
@@ -1510,7 +1661,7 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
             cmi_coefficients[c] = coeff;
             cmi_usage.inc(c, coeff);
 
-            cost += coeff * std::max(0.1, c.complexity_cost()); // Give a reason to avoid using trivial rules.
+            total_cost += coeff * std::max(0.1, c.complexity_cost()); // Give a reason to avoid using trivial rules.
         }
         else
         {
@@ -1521,7 +1672,7 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
             const auto& c = cmi_constraints[j];
             for (const auto& [cmi, v] : c.entries)
                 cmi_usage.inc(cmi, coeff * v);
-            cost += std::abs(coeff) * custom_rule_complexity_cost(c);
+            total_cost += std::abs(coeff) * custom_rule_complexity_cost(c);
         }
     }
 
@@ -1541,10 +1692,10 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
         r = Rule(funcs, Rule::CMI_DEF_I, 0, t[0], t[1], t[2], t.scenario);
 
         rule_coefficients[r] = -v;
-        cost += std::abs(v) * r.complexity_cost(funcs);
+        total_cost += std::abs(v) * r.complexity_cost(funcs);
     }
 
-    std::cout << "Simplifying from cost " << cost << '\n';
+    std::cout << "Simplifying from cost " << total_cost << '\n';
 }
 
 void ShannonProofSimplifier::add_all_rules()
@@ -1905,8 +2056,8 @@ bool ShannonProofSimplifier::simplify(int depth)
             custom_rule_coefficients[i] = coeff;
     }
 
-    bool changed = (cost - new_cost > eps);
-    cost = new_cost;
+    bool changed = (total_cost - new_cost > eps);
+    total_cost = new_cost;
 
     return changed;
 }

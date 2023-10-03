@@ -169,6 +169,9 @@ inline std::ostream& operator<<(std::ostream&, const LinearProof<Var, Rule>&);
 template<typename Var, typename Rule>
 struct LinearProof
 {
+    // 0 indexed.
+    std::vector<double> primal_solution;
+
     // Index 0: constant offset.
     // Indices 1 to regular_constraints.size(): regular (e.g. non-negativity) constraints.
     // Indices regular_constraints.size() + 1 to
@@ -200,6 +203,7 @@ struct LinearProof
     template<typename Var2, typename Rule2, typename Func1, typename Func2>
     LinearProof(LinearProof<Var2, Rule2> other, Func1&& map_vars, Func2&& map_rules) :
         initialized(other.initialized),
+        primal_solution(other.primal_solution),
         dual_solution(std::move(other.dual_solution)),
         custom_constraints(std::move(other.custom_constraints)),
         objective(std::move(other.objective))
@@ -419,6 +423,8 @@ struct ExtendedShannonRule
 {
     enum type_enum
     {
+        CMI_NONNEG,
+
         CMI_DEF_I,
 
         CHAIN,
@@ -443,7 +449,7 @@ struct ExtendedShannonRule
 
     bool is_equality() const
     {
-        return type != MONOTONE_COND && type != MONOTONE_MUT;
+        return type != CMI_NONNEG && type != MONOTONE_COND && type != MONOTONE_MUT;
     }
 
     bool is_trivial(const SparseVectorT<CmiTriplet>& c) const;
