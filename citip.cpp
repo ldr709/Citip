@@ -101,10 +101,20 @@ static int skip_bit(int pool, int bit_index)
     return left | right;
 }
 
-static std::array<int, 2> var_to_set_and_scenario(int v, int num_vars)
+static std::array<int, 2> var_to_set_and_scenario(
+    int v, const std::vector<std::vector<std::string>>& var_names_by_scenario)
 {
-    int dim_per_scenario = (1<<num_vars) - 1;
-    return {((v - 1) % dim_per_scenario) + 1, (v - 1) / dim_per_scenario};
+    for (int i = 0; i < var_names_by_scenario.size(); ++i)
+    {
+        int num_vars = (1 << var_names_by_scenario[i].size()) - 1;
+
+        if (v <= num_vars)
+            return {v, i};
+
+        v -= num_vars;
+    }
+
+    throw std::runtime_error("Could not find variable's scenario");
 }
 
 static int apply_implicits(const ImplicitRules& implicits, int set)
@@ -188,55 +198,61 @@ bool CmiTriplet::is_zero() const
     return t[0] == 0 || t[1] == 0;
 }
 
-static int scenario_var(const ImplicitRules& implicits, int num_vars, int scenario, int a)
+static inline int scenario_var(
+    const ImplicitRules& implicits, const std::vector<std::vector<std::string>>& var_names_by_scenario,
+    int scenario, int a)
 {
-    int dim_per_scenario = (1 << num_vars) - 1;
-    return scenario * dim_per_scenario + apply_implicits(implicits, a);
+    int prev_vars = 0;
+    for (int i = 0; i < scenario; ++i)
+        prev_vars += (1 << var_names_by_scenario[i].size()) - 1;
+    return prev_vars + apply_implicits(implicits, a);
 }
 
 
 void ShannonTypeProblem::add_columns()
 {
-    for (int i = 1; i < (1<<random_var_names.size()); ++i)
+    for (int scenario = 0; scenario < scenario_names.size(); ++scenario)
     {
-        auto [it, inserted] = column_map.insert({apply_implicits(implicits, i), column_map.size()});
-        if (inserted)
-            inv_column_map.push_back(it->first);
-    }
-
-    // Repeat same pattern for each scenario.
-    int dim_per_scenario = (1 << random_var_names.size()) - 1;
-    int real_dim_per_scenario = column_map.size();
-    for (int scenario = 1; scenario < scenario_names.size(); ++scenario)
-    {
-        for (int i = 0; i < real_dim_per_scenario; ++i)
+        for (int i = 1; i < (1<<var_names_by_scenario[scenario].size()); ++i)
         {
-            int s = inv_column_map[i];
-            int j = dim_per_scenario * scenario + s;
-            column_map.insert({j, column_map.size()});
-            inv_column_map.push_back(j);
+            int v = scenario_var(implicits_by_scenario[scenario], var_names_by_scenario, scenario, i);
+            auto [it, inserted] = column_map.insert({v, column_map.size()});
+            if (inserted)
+                inv_column_map.push_back(v);
         }
     }
 
     add_columns(column_map.size());
 }
 
-void ShannonTypeProblem::add_elemental_inequalities(int num_vars, int num_scenarios)
+void ShannonTypeProblem::add_elemental_inequalities()
 {
+    int num_scenarios = var_names_by_scenario.size();
+
     // Identify each variable with its index i from I = {0, 1, ..., N-1}.
     // Then entropy is a real valued set function from the power set of
     // indices P = 2**I. The value for the empty set can be defined to be
     // zero and is irrelevant. Therefore the dimensionality of the problem
-    // is 2**N-1 (times num_scenarios).
+    // is 2**N-1, summed over the different scenarios num_scenarios).
 
-    // After choosing 2 variables there are 2**(N-2) possible subsets of
-    // the remaining N-2 variables.
-    int sub_dim = 1 << (num_vars-2);
+    int num_rows = 0;
+    for (int scenario = 0; scenario < num_scenarios; ++scenario)
+    {
+        int num_vars = var_names_by_scenario[scenario].size();
 
-    row_to_cmi.reserve(num_scenarios * (num_vars + (num_vars * (num_vars - 1) / 2) * sub_dim + 1));
+        // After choosing 2 variables there are 2**(N-2) possible subsets of
+        // the remaining N-2 variables.
+        int sub_dim = 1 << (num_vars-2);
+        num_rows += num_vars + (num_vars * (num_vars - 1) / 2) * sub_dim + 1;
+    }
+    row_to_cmi.reserve(num_rows);
 
     for (int scenario = 0; scenario < num_scenarios; ++scenario)
     {
+        int num_vars = var_names_by_scenario[scenario].size();
+        int sub_dim = 1 << (num_vars-2);
+        const auto& implicits = implicits_by_scenario[scenario];
+
         // NOTE: We use 1-based indices for variable numbers, because 0 would correspond to H() = 0
         // and so be useless. However, Coin expects 0-based indices, so translation is needed.
         int indices[4];
@@ -265,8 +281,8 @@ void ShannonTypeProblem::add_elemental_inequalities(int num_vars, int num_scenar
             if (all == apply_implicits(implicits, c))
                 continue;
 
-            indices[0] = column_map.at(scenario_var(implicits, random_var_names.size(), scenario, all));
-            indices[1] = column_map.at(scenario_var(implicits, random_var_names.size(), scenario, c));
+            indices[0] = column_map.at(scenario_var(implicits, var_names_by_scenario, scenario, all));
+            indices[1] = column_map.at(scenario_var(implicits, var_names_by_scenario, scenario, c));
             values[0] = +1;
             values[1] = -1;
             int row = coin.add_row_lb(0.0, 2, indices, values);
@@ -284,15 +300,15 @@ void ShannonTypeProblem::add_elemental_inequalities(int num_vars, int num_scenar
                     if (K != apply_implicits(implicits, K))
                         continue;
 
-                    indices[0] = column_map.at(scenario_var(implicits, random_var_names.size(), scenario, A|K));
-                    indices[1] = column_map.at(scenario_var(implicits, random_var_names.size(), scenario, B|K));
-                    indices[2] = column_map.at(scenario_var(implicits, random_var_names.size(), scenario, A|B|K));
+                    indices[0] = column_map.at(scenario_var(implicits, var_names_by_scenario, scenario, A|K));
+                    indices[1] = column_map.at(scenario_var(implicits, var_names_by_scenario, scenario, B|K));
+                    indices[2] = column_map.at(scenario_var(implicits, var_names_by_scenario, scenario, A|B|K));
                     values[0] = +1;
                     values[1] = +1;
                     values[2] = -1;
                     if (K)
                     {
-                        indices[3] = column_map.at(scenario_var(implicits, random_var_names.size(), scenario, K));
+                        indices[3] = column_map.at(scenario_var(implicits, var_names_by_scenario, scenario, K));
                         values[3] = -1;
                     }
                     int row = coin.add_row_lb(0.0, K ? 4 : 3, indices, values);
@@ -321,6 +337,8 @@ void ParserOutput::add_term(SparseVector& v, SparseVectorT<CmiTriplet>& cmi_v,
 
     const int scenario = q.parts.scenario == "" ? scenario_wildcard : scenarios.at(q.parts.scenario);
 
+    const auto& implicits = implicits_by_scenario[scenario];
+
     // Need to index 2**num_parts subsets. For more detailed reasoning see
     // the check_num_vars() function.
     int max_parts = 8*sizeof(int) - 2;
@@ -345,8 +363,8 @@ void ParserOutput::add_term(SparseVector& v, SparseVectorT<CmiTriplet>& cmi_v,
 
     std::vector<int> set_indices(num_parts);
     for (int i = 0; i < num_parts; ++i)
-        set_indices[i] = get_set_index(q.parts.lists[i]);
-    int c = get_set_index(q.cond);
+        set_indices[i] = get_set_index(scenario, q.parts.lists[i]);
+    int c = get_set_index(scenario, q.cond);
 
     if (num_parts == 1)
     {
@@ -378,24 +396,25 @@ void ParserOutput::add_term(SparseVector& v, SparseVectorT<CmiTriplet>& cmi_v,
     }
 }
 
-int ParserOutput::get_var_index(const std::string& s)
+int ParserOutput::get_var_index(int scenario, const std::string& s)
 {
-    auto&& it = vars.find(s);
-    if (it != vars.end())
+    std::tuple<int, std::string> key = {scenario, s};
+    auto&& it = vars_by_scenario.find(key);
+    if (it != vars_by_scenario.end())
         return it->second;
-    int next_index = var_names.size();
+    int next_index = var_names_by_scenario[scenario].size();
     check_num_vars(next_index + 1);
-    vars[s] = next_index;
-    var_names.push_back(s);
+    vars_by_scenario[key] = next_index;
+    var_names_by_scenario[scenario].push_back(s);
     return next_index;
 }
 
-int ParserOutput::get_set_index(const ast::VarList& l)
+int ParserOutput::get_set_index(int scenario, const ast::VarList& l)
 {
     int idx = 0;
     for (auto&& v : l)
-        idx |= 1 << get_var_index(v);
-    return apply_implicits(implicits, idx);
+        idx |= 1 << get_var_index(scenario, v);
+    return apply_implicits(implicits_by_scenario[scenario], idx);
 }
 
 void ParserOutput::add_relation(SparseVector v, SparseVectorT<CmiTriplet> cmi_v, bool is_inquiry)
@@ -436,6 +455,48 @@ void ParserOutput::indist(ast::IndistinguishableScenarios is)
 
 void ParserOutput::process()
 {
+    // Add the scenarios
+    for (const auto& s : statement_list)
+        std::visit(overload {
+            [&](const ast::Relation& r)
+            {
+                for (const ast::Expression& side : {r.left, r.right})
+                    for (const auto& term : side)
+                        if (term.quantity.parts.scenario != "")
+                            add_scenario(term.quantity.parts.scenario);
+            },
+            [&](const ast::MarkovChain& mc)
+            {
+                if (mc.scenario != "")
+                    add_scenario(mc.scenario);
+            },
+            [&](const ast::MutualIndependence& mi)
+            {
+                if (mi.sets.scenario != "")
+                    add_scenario(mi.sets.scenario);
+            },
+            [&](const ast::FunctionOf& f)
+            {
+                if (f.scenario != "")
+                    add_scenario(f.scenario);
+            },
+            [&](const ast::IndistinguishableScenarios& is)
+            {
+                for (const auto& group: is)
+                {
+                    for (const auto& sc: group.scenarios)
+                        add_scenario(sc);
+                }
+            }
+        }, s);
+
+    if (scenario_names.empty())
+        add_scenario("");
+
+    implicits_by_scenario.resize(scenario_names.size());
+    var_names_by_scenario.resize(scenario_names.size());
+
+    // Add the variables.
     for (const auto& s : statement_list)
         std::visit(overload {
             [&](const ast::Relation& r)
@@ -444,53 +505,44 @@ void ParserOutput::process()
                 {
                     for (const auto& term : side)
                     {
-                        if (term.quantity.parts.scenario != "")
-                            add_scenario(term.quantity.parts.scenario);
-
-                        for (const auto& vl : term.quantity.parts.lists)
-                            add_symbols(vl);
-                        add_symbols(term.quantity.cond);
+                        for (auto [scenario, last] = scenario_range(term.quantity.parts.scenario);
+                             scenario < last; ++scenario)
+                        {
+                            for (const auto& vl : term.quantity.parts.lists)
+                                add_symbols(scenario, vl);
+                            add_symbols(scenario, term.quantity.cond);
+                        }
                     }
                 }
             },
             [&](const ast::MarkovChain& mc)
             {
-                if (mc.scenario != "")
-                    add_scenario(mc.scenario);
-
-                for (const auto& vl : mc.lists)
-                    add_symbols(vl);
+                for (auto [scenario, last] = scenario_range(mc.scenario); scenario < last; ++scenario)
+                    for (const auto& vl : mc.lists)
+                        add_symbols(scenario, vl);
             },
             [&](const ast::MutualIndependence& mi)
             {
-                if (mi.sets.scenario != "")
-                    add_scenario(mi.sets.scenario);
-
-                for (const auto& vl : mi.sets.lists)
-                    add_symbols(vl);
+                for (auto [scenario, last] = scenario_range(mi.sets.scenario); scenario < last; ++scenario)
+                    for (const auto& vl : mi.sets.lists)
+                        add_symbols(scenario, vl);
             },
             [&](const ast::FunctionOf& f)
             {
-                if (f.scenario != "")
-                    add_scenario(f.scenario);
-
-                add_symbols(f.function);
-                add_symbols(f.of);
+                for (auto [scenario, last] = scenario_range(f.scenario); scenario < last; ++scenario)
+                {
+                    add_symbols(scenario, f.function);
+                    add_symbols(scenario, f.of);
+                }
             },
             [&](const ast::IndistinguishableScenarios& is)
             {
                 for (const auto& group: is)
-                {
                     for (const auto& sc: group.scenarios)
-                        add_scenario(sc);
-
-                    add_symbols(group.view);
-                }
+                        for (auto [scenario, last] = scenario_range(sc); scenario < last; ++scenario)
+                            add_symbols(scenario, group.view);
             }
         }, s);
-
-    if (scenario_names.empty())
-        add_scenario("");
 
     // Retrieve the implicit function_of statements.
     for (const auto& s : statement_list)
@@ -500,29 +552,33 @@ void ParserOutput::process()
         const auto& fo = std::get<FUNCTION_OF>(s);
         if (!fo.implicit)
             continue;
-        if (fo.scenario != "")
-            throw std::runtime_error("Implicit function-of rules must apply to all scenarios.");
 
-        int func = get_set_index(fo.function);
-        int of = get_set_index(fo.of);
-        implicits.funcs.push_back({func, of});
+        for (auto [scenario, last] = scenario_range(fo.scenario); scenario < last; ++scenario)
+        {
+            int func = get_set_index(scenario, fo.function);
+            int of = get_set_index(scenario, fo.of);
+            implicits_by_scenario[scenario].funcs.push_back({func, of});
+        }
     }
 
     // Apply the functions_of statements to each other, so that later they can be resolved faster.
-    bool changed;
-    do
+    for (auto& impls : implicits_by_scenario)
     {
-        changed = false;
-        for (auto& f : implicits.funcs)
+        bool changed;
+        do
         {
-            int new_func = f.func | (apply_implicits(implicits, f.func | f.of) & ~f.of);
-            if (new_func != f.func)
+            changed = false;
+            for (auto& f : impls.funcs)
             {
-                f.func = new_func;
-                changed = true;
+                int new_func = f.func | (apply_implicits(impls, f.func | f.of) & ~f.of);
+                if (new_func != f.func)
+                {
+                    f.func = new_func;
+                    changed = true;
+                }
             }
-        }
-    } while (changed);
+        } while (changed);
+    }
 
     // Retrieve the implicit independence statements.
     for (const auto& s : statement_list)
@@ -532,25 +588,26 @@ void ParserOutput::process()
         const auto& mi = std::get<MUTUAL_INDEPENDENCE>(s);
         if (!mi.implicit)
             continue;
-        if (mi.sets.scenario != "")
-            throw std::runtime_error("Implicit independence rules must apply to all scenarios.");
 
-        std::vector<int> sets(mi.sets.lists.size());
-        for (int i = 0; i < sets.size(); ++i)
-            // Implicit function rules are applied to the independence sets here.
-            sets[i] = get_set_index(mi.sets.lists[i]);
+        for (auto [scenario, last] = scenario_range(mi.sets.scenario); scenario < last; ++scenario)
+        {
+            std::vector<int> sets(mi.sets.lists.size());
+            for (int i = 0; i < sets.size(); ++i)
+                // Implicit function rules are applied to the independence sets here.
+                sets[i] = get_set_index(scenario, mi.sets.lists[i]);
 
-        std::vector<int> set_forward_unions(sets.size(), 0);
-        for (int i = 1; i < sets.size(); ++i)
-            set_forward_unions[i] = set_forward_unions[i - 1] | sets[i - 1];
+            std::vector<int> set_forward_unions(sets.size(), 0);
+            for (int i = 1; i < sets.size(); ++i)
+                set_forward_unions[i] = set_forward_unions[i - 1] | sets[i - 1];
 
-        std::vector<int> set_backward_unions(sets.size(), 0);
-        for (int i = sets.size() - 1; i > 0; --i)
-            set_backward_unions[i - 1] = set_backward_unions[i] | sets[i];
+            std::vector<int> set_backward_unions(sets.size(), 0);
+            for (int i = sets.size() - 1; i > 0; --i)
+                set_backward_unions[i - 1] = set_backward_unions[i] | sets[i];
 
-        for (int i = 0; i < sets.size(); ++i)
-            implicits.indeps.push_back(
-                ImplicitIndependence {sets[i], set_forward_unions[i] | set_backward_unions[i]});
+            for (int i = 0; i < sets.size(); ++i)
+                implicits_by_scenario[scenario].indeps.push_back(
+                    ImplicitIndependence {sets[i], set_forward_unions[i] | set_backward_unions[i]});
+        }
     }
 
     for (const auto& s : statement_list)
@@ -564,27 +621,36 @@ void ParserOutput::add_scenario(const std::string& scenario)
         scenario_names.push_back(scenario);
 }
 
-void ParserOutput::add_symbols(const ast::VarList& vl)
+void ParserOutput::add_symbols(int scenario, const ast::VarList& vl)
 {
     for (auto&& v : vl)
-        get_var_index(v);
+        get_var_index(scenario, v);
 }
 
 void ParserOutput::add_cmi(SparseVector& v, SparseVectorT<CmiTriplet>& cmi_v,
                            CmiTriplet t, double coeff) const
 {
+    const auto& implicits = implicits_by_scenario[t.scenario];
     t = CmiTriplet(implicits, t[0], t[1], t[2], t.scenario);
     if (t.is_zero())
         return;
 
     auto [a, b, z] = t;
-    v.inc(scenario_var(implicits, var_names.size(), t.scenario, a|z), coeff);
-    v.inc(scenario_var(implicits, var_names.size(), t.scenario, b|z), coeff);
-    v.inc(scenario_var(implicits, var_names.size(), t.scenario, a|b|z), -coeff);
+    v.inc(scenario_var(implicits, var_names_by_scenario, t.scenario, a|z), coeff);
+    v.inc(scenario_var(implicits, var_names_by_scenario, t.scenario, b|z), coeff);
+    v.inc(scenario_var(implicits, var_names_by_scenario, t.scenario, a|b|z), -coeff);
     if (z)
-        v.inc(scenario_var(implicits, var_names.size(), t.scenario, z), -coeff);
+        v.inc(scenario_var(implicits, var_names_by_scenario, t.scenario, z), -coeff);
 
     cmi_v.inc(t, coeff);
+}
+
+std::tuple<int, int> ParserOutput::scenario_range(const std::string& scenario) const
+{
+    const int first_scenario = scenario == "" ? 0 : scenarios.at(scenario);
+    const int last_scenario = scenario == "" ? scenario_names.size() : first_scenario + 1;
+
+    return {first_scenario, last_scenario};
 }
 
 void ParserOutput::process_statement(const statement& s)
@@ -658,17 +724,17 @@ done:
 
 void ParserOutput::process_mutual_independence(const ast::MutualIndependence& mi)
 {
-    const int first_scenario = mi.sets.scenario == "" ? 0 : scenarios.at(mi.sets.scenario);
-    const int last_scenario = mi.sets.scenario == "" ? scenario_names.size() : first_scenario + 1;
-
     bool is_inquiry = inquiries.empty();
 
-    std::vector<int> set_indices(mi.sets.lists.size());
-    for (int i = 0; i < set_indices.size(); ++i)
-        set_indices[i] = get_set_index(mi.sets.lists[i]);
-
-    for (int scenario = first_scenario; scenario < last_scenario; ++scenario)
+    for (auto [scenario, last_scenario] = scenario_range(mi.sets.scenario);
+         scenario < last_scenario; ++scenario)
     {
+        const auto& implicits = implicits_by_scenario[scenario];
+
+        std::vector<int> set_indices(mi.sets.lists.size());
+        for (int i = 0; i < set_indices.size(); ++i)
+            set_indices[i] = get_set_index(scenario, mi.sets.lists[i]);
+
         auto convert_set = [&](int set)
         {
             int out_set = 0;
@@ -781,19 +847,19 @@ void ParserOutput::process_mutual_independence(const ast::MutualIndependence& mi
 
 void ParserOutput::process_markov_chain(const ast::MarkovChain& mc)
 {
-    const int first_scenario = mc.scenario == "" ? 0 : scenarios.at(mc.scenario);
-    const int last_scenario = mc.scenario == "" ? scenario_names.size() : first_scenario + 1;
-
     bool is_inquiry = inquiries.empty();
 
-    for (int scenario = first_scenario; scenario < last_scenario; ++scenario)
+    for (auto [scenario, last_scenario] = scenario_range(mc.scenario);
+         scenario < last_scenario; ++scenario)
     {
+        const auto& implicits = implicits_by_scenario[scenario];
+
         int a = 0;
         for (int i = 0; i+2 < mc.lists.size(); ++i) {
             int b, c;
-            a |= get_set_index(mc.lists[i+0]);
-            b = get_set_index(mc.lists[i+1]);
-            c = get_set_index(mc.lists[i+2]);
+            a |= get_set_index(scenario, mc.lists[i+0]);
+            b = get_set_index(scenario, mc.lists[i+1]);
+            c = get_set_index(scenario, mc.lists[i+2]);
             // 0 = I(a:c|b) = H(a|b) + H(c|b) - H(a,c|b)
             SparseVector v;
             SparseVectorT<CmiTriplet> cmi_v;
@@ -811,14 +877,15 @@ void ParserOutput::process_function_of(const ast::FunctionOf& fo)
         return;
 
     bool is_inquiry = inquiries.empty();
-    int func = get_set_index(fo.function);
-    int of = get_set_index(fo.of);
 
-    const int first_scenario = fo.scenario == "" ? 0 : scenarios.at(fo.scenario);
-    const int last_scenario = fo.scenario == "" ? scenario_names.size() : first_scenario + 1;
-
-    for (int scenario = first_scenario; scenario < last_scenario; ++scenario)
+    for (auto [scenario, last_scenario] = scenario_range(fo.scenario);
+         scenario < last_scenario; ++scenario)
     {
+        const auto& implicits = implicits_by_scenario[scenario];
+
+        int func = get_set_index(scenario, fo.function);
+        int of = get_set_index(scenario, fo.of);
+
         // 0 = H(func|of) = H(func,of) - H(of)
         SparseVector v;
         SparseVectorT<CmiTriplet> cmi_v;
@@ -837,17 +904,20 @@ void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
                             int scenario1, const ast::VarList& view1,
                             bool all_redundant)
     {
+        const auto& implicits0 = implicits_by_scenario[scenario0];
+        const auto& implicits1 = implicits_by_scenario[scenario1];
+
         assert(view0.size() == view1.size());
         assert(view0.size() > 0);
 
         int full_set = (1 << view0.size()) - 1;
 
-        auto convert_set = [&](const ast::VarList& view, int set)
+        auto convert_set = [&](int scenario, const ast::VarList& view, int set)
         {
             int out_set = 0;
             for (int i = 0; i < view.size(); ++i)
                 if ((set >> i) & 1)
-                    out_set |= (1 << get_var_index(view[i]));
+                    out_set |= (1 << get_var_index(scenario, view[i]));
             return out_set;
         };
 
@@ -857,11 +927,11 @@ void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
         if (!all_redundant)
             for (int a : util::skip_n(util::disjoint_subsets(0, full_set), 1))
             {
-                int a0 = convert_set(view0, a);
-                int a1 = convert_set(view1, a);
+                int a0 = convert_set(scenario0, view0, a);
+                int a1 = convert_set(scenario1, view1, a);
 
-                CmiTriplet cmi0(implicits, a0, a0, 0, scenario0);
-                CmiTriplet cmi1(implicits, a1, a1, 0, scenario1);
+                CmiTriplet cmi0(implicits0, a0, a0, 0, scenario0);
+                CmiTriplet cmi1(implicits1, a1, a1, 0, scenario1);
                 if (cmi0.is_zero() && cmi1.is_zero())
                     continue;
 
@@ -896,8 +966,14 @@ void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
                     if (a != b && (a | b) == b)
                         continue;
 
-                    CmiTriplet cmi0(implicits, convert_set(view0, a), convert_set(view0, b), convert_set(view0, z), scenario0);
-                    CmiTriplet cmi1(implicits, convert_set(view1, a), convert_set(view1, b), convert_set(view1, z), scenario1);
+                    CmiTriplet cmi0(implicits0,
+                                    convert_set(scenario0, view0, a),
+                                    convert_set(scenario0, view0, b),
+                                    convert_set(scenario0, view0, z), scenario0);
+                    CmiTriplet cmi1(implicits1,
+                                    convert_set(scenario1, view1, a),
+                                    convert_set(scenario1, view1, b),
+                                    convert_set(scenario1, view1, z), scenario1);
 
                     if (cmi0.is_zero() && cmi1.is_zero())
                         continue;
@@ -1146,25 +1222,26 @@ LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_r
 }
 
 
-ShannonTypeProblem::ShannonTypeProblem(std::vector<std::string> random_var_names_,
+ShannonTypeProblem::ShannonTypeProblem(std::vector<std::vector<std::string>> var_names_by_scenario_,
                                        std::vector<std::string> scenario_names_,
-                                       ImplicitRules implicit_function_ofs_,
+                                       std::vector<ImplicitRules> implicits_by_scenario_,
                                        std::vector<SparseVectorT<CmiTriplet>> cmi_constraints_redundant_) :
     LinearProblem(),
-    random_var_names(move(random_var_names_)),
+    var_names_by_scenario(move(var_names_by_scenario_)),
     scenario_names(move(scenario_names_)),
-    implicits(move(implicit_function_ofs_)),
+    implicits_by_scenario(move(implicits_by_scenario_)),
     cmi_constraints_redundant(cmi_constraints_redundant_)
 {
-    int num_vars = random_var_names.size();
-    check_num_vars(num_vars);
+    for (int i = 0; i < scenario_names_.size(); ++i)
+        check_num_vars(var_names_by_scenario[i].size());
 
     add_columns();
-    add_elemental_inequalities(num_vars, scenario_names.size());
+    add_elemental_inequalities();
 }
 
 ShannonTypeProblem::ShannonTypeProblem(const ParserOutput& out) :
-    ShannonTypeProblem(out.var_names, out.scenario_names, out.implicits, out.cmi_constraints_redundant)
+    ShannonTypeProblem(out.var_names_by_scenario, out.scenario_names,
+                       out.implicits_by_scenario, out.cmi_constraints_redundant)
 {
     for (int i = 0; i < out.constraints.size(); ++i)
         add(out.constraints[i], out.cmi_constraints[i]);
@@ -1198,13 +1275,13 @@ static void print_var_subset(std::ostream& out, int v,
 
 const std::string& ShannonVar::scenario() const
 {
-    return scenario_names[var_to_set_and_scenario(v, random_var_names.size())[1]];
+    return scenario_names[var_to_set_and_scenario(v, var_names_by_scenario)[1]];
 }
 
 std::ostream& operator<<(std::ostream& out, const ShannonVar::PrintVarsOut& pvo)
 {
-    int set = var_to_set_and_scenario(pvo.parent.v, pvo.parent.random_var_names.size())[0];
-    print_var_subset(out, set, pvo.parent.random_var_names);
+    auto [set, scenario] = var_to_set_and_scenario(pvo.parent.v, pvo.parent.var_names_by_scenario);
+    print_var_subset(out, set, pvo.parent.var_names_by_scenario[scenario]);
     return out;
 }
 
@@ -1215,21 +1292,20 @@ std::ostream& operator<<(std::ostream& out, const ShannonVar& sv)
 
 bool ShannonRule::print(std::ostream& out, const ShannonVar* vars, double scale) const
 {
-    const std::vector<std::string>* random_var_names = &vars[0].random_var_names;
+    const std::vector<std::vector<std::string>>* var_names_by_scenario = &vars[0].var_names_by_scenario;
     const std::vector<std::string>* scenario_names = &vars[0].scenario_names;
-    const ImplicitRules* implicits = &vars[0].implicits;
+    const ImplicitRules* implicits = &vars[0].implicits_by_scenario[scenario];
 
     if (scale == 0.0 || is_zero())
         return false;
 
     print_coeff(out, scale, true);
-    out << ExtendedShannonVar {*this, random_var_names, scenario_names, implicits};
+    out << ExtendedShannonVar {*this, var_names_by_scenario, scenario_names, implicits};
     out << " >= 0";
     return true;
 }
 
-ShannonTypeProof ShannonTypeProblem::prove(const SparseVector& I,
-                                           SparseVectorT<CmiTriplet> cmi_I)
+ShannonTypeProof ShannonTypeProblem::prove(const SparseVector& I, SparseVectorT<CmiTriplet> cmi_I)
 {
     SparseVector realObj;
     realObj.is_equality = I.is_equality;
@@ -1242,14 +1318,14 @@ ShannonTypeProof ShannonTypeProblem::prove(const SparseVector& I,
         [&] (const LinearVariable& v)
         {
             return ShannonVar{
-                random_var_names, scenario_names, column_map, implicits, inv_column_map[v.id]
+                var_names_by_scenario, scenario_names, column_map, implicits_by_scenario, inv_column_map[v.id]
             };
         },
         [&] (const NonNegativityOrOtherRule<CmiTriplet>& r) -> ShannonRule {
             if (r.index() == 0)
             {
                 int var = inv_column_map[lproof.variables[std::get<0>(r).v].id];
-                auto [set, scenario] = var_to_set_and_scenario(var, random_var_names.size());
+                auto [set, scenario] = var_to_set_and_scenario(var, var_names_by_scenario);
                 return ShannonRule({set, set, 0, scenario});
             }
             else
@@ -1303,8 +1379,8 @@ private:
 
     CoinOsiProblem coin;
 
-    const ImplicitRules& implicits;
-    const std::vector<std::string>& random_var_names;
+    const std::vector<ImplicitRules>& implicits_by_scenario;
+    const std::vector<std::vector<std::string>>& var_names_by_scenario;
     const std::vector<std::string>& scenario_names;
 };
 
@@ -1548,7 +1624,7 @@ int ShannonProofSimplifier::add_rule(const Rule& r)
     if (!inserted)
         return idx;
 
-    auto constraint = r.get_constraint(implicits);
+    auto constraint = r.get_constraint(implicits_by_scenario[r.scenario]);
 
     // Don't add trivial rules. Also, don't add rules that are identical to just CMI >= 0 rules.
     bool skip = true;
@@ -1602,9 +1678,9 @@ int ShannonProofSimplifier::get_row_index(CmiTriplet t)
 
 ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proof_) :
     orig_proof(orig_proof_),
-    random_var_names(orig_proof.variables[0].random_var_names),
+    var_names_by_scenario(orig_proof.variables[0].var_names_by_scenario),
     scenario_names(orig_proof.variables[0].scenario_names),
-    implicits(orig_proof.variables[0].implicits),
+    implicits_by_scenario(orig_proof.variables[0].implicits_by_scenario),
     cmi_constraints(orig_proof.cmi_constraints)
 {
     if (!orig_proof)
@@ -1655,6 +1731,8 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
             // Already a single entropy;
             continue;
 
+        const auto& implicits = implicits_by_scenario[t.scenario];
+
         // I(a;b|c) = I(a,c) + I(b,c) - I(a,b,c) - I(c)
         r = Rule(implicits, Rule::CMI_DEF_I, 0, t[0], t[1], t[2], t.scenario);
 
@@ -1667,12 +1745,13 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
 
 void ShannonProofSimplifier::add_all_rules()
 {
-    int num_vars = random_var_names.size();
-    int full_set = (1 << num_vars) - 1;
-
     // Add rules (other than CMI non negativity, which is implicit.)
     for (int scenario = 0; scenario < scenario_names.size(); ++scenario)
     {
+        const auto& implicits = implicits_by_scenario[scenario];
+        int num_vars = var_names_by_scenario[scenario].size();
+        int full_set = (1 << num_vars) - 1;
+
         for (int z = 0; z < full_set; ++z)
         {
             for (int a : util::skip_n(util::disjoint_subsets(z, full_set), 1))
@@ -1707,7 +1786,8 @@ void ShannonProofSimplifier::add_all_rules()
 
 void ShannonProofSimplifier::add_adjacent_rules(CmiTriplet t)
 {
-    int num_vars = random_var_names.size();
+    const auto& implicits = implicits_by_scenario[t.scenario];
+    int num_vars = var_names_by_scenario[t.scenario].size();
     int full_set = (1 << num_vars) - 1;
 
     // Handle symmetry of CMI through brute force. (I.e., flip the CMI and try again).
@@ -1797,7 +1877,8 @@ void ShannonProofSimplifier::add_adjacent_rules(CmiTriplet t)
 // (in full_set) branching factor.
 void ShannonProofSimplifier::add_adjacent_rules_quadratic(CmiTriplet t)
 {
-    int num_vars = random_var_names.size();
+    const auto& implicits = implicits_by_scenario[t.scenario];
+    int num_vars = var_names_by_scenario[t.scenario].size();
     int full_set = (1 << num_vars) - 1;
 
     if (t[0] != t[1])
@@ -1911,7 +1992,7 @@ bool ShannonProofSimplifier::simplify(int depth)
     // cols are easy:
     for (auto [r, col] : rule_indices)
     {
-        double cost = r.complexity_cost(implicits);
+        double cost = r.complexity_cost(implicits_by_scenario[r.scenario]);
         coin.obj[col] += cost;
         if (r.is_equality())
             coin.obj[col + 1] -= cost;
@@ -2035,6 +2116,7 @@ ShannonProofSimplifier::operator SimplifiedShannonProof()
         return SimplifiedShannonProof();
 
     SimplifiedShannonProof proof;
+    proof.implicits_by_scenario = &implicits_by_scenario;
     proof.initialized = true;
 
     coin = CoinOsiProblem(OsiClpSolverInterface());
@@ -2058,7 +2140,7 @@ ShannonProofSimplifier::operator SimplifiedShannonProof()
         proof.regular_constraints.emplace_back(
             NonNegativityOrOtherRule<Rule>::Parent(std::in_place_index_t<1>(), r));
 
-        auto c = r.get_constraint(implicits);
+        auto c = r.get_constraint(implicits_by_scenario[r.scenario]);
         for (const auto& [cmi, v] : c.entries)
             get_row_index(cmi);
 
@@ -2083,7 +2165,7 @@ ShannonProofSimplifier::operator SimplifiedShannonProof()
 
     proof.variables.resize(coin.num_rows);
     for (auto [t, i] : cmi_indices)
-        proof.variables[i] = ExtendedShannonVar{t, &random_var_names, &scenario_names, &implicits};
+        proof.variables[i] = ExtendedShannonVar{t, &var_names_by_scenario, &scenario_names, &implicits_by_scenario[t.scenario]};
 
     if (orig_proof.objective.get(0) != 0.0)
         proof.objective.inc(0, orig_proof.objective.get(0));
@@ -2098,19 +2180,20 @@ std::ostream& operator<<(std::ostream& out, ExtendedShannonVar t)
     if (t[0] > t[1])
         std::swap(t[0], t[1]);
 
+    const auto& var_names = (*t.var_names_by_scenario)[t.scenario];
     out << (t[0] == t[1] ? 'H' : 'I') << (*t.scenario_names)[t.scenario] << '(';
-    print_var_subset(out, t[0], *t.random_var_names);
+    print_var_subset(out, t[0], var_names);
 
     if (t[1] != t[0])
     {
         out << "; ";
-        print_var_subset(out, t[1], *t.random_var_names);
+        print_var_subset(out, t[1], var_names);
     }
 
     if (t[2])
     {
         out << " | ";
-        print_var_subset(out, t[2], *t.random_var_names);
+        print_var_subset(out, t[2], var_names);
     }
 
     out << ')';
@@ -2119,9 +2202,12 @@ std::ostream& operator<<(std::ostream& out, ExtendedShannonVar t)
 
 bool ExtendedShannonRule::print(std::ostream& out, const ExtendedShannonVar* vars, double scale) const
 {
-    const std::vector<std::string>* random_var_names = vars[0].random_var_names;
+    const std::vector<std::vector<std::string>>* var_names_by_scenario = vars[0].var_names_by_scenario;
     const std::vector<std::string>* scenario_names = vars[0].scenario_names;
-    const ImplicitRules* implicits = vars[0].implicits;
+    const ImplicitRules* implicits = nullptr;
+    for (size_t i = 0; !implicits; ++i)
+        if (vars[i].scenario == scenario)
+            implicits = vars[i].implicits;
 
     auto c = get_constraint(*implicits);
 
@@ -2134,7 +2220,7 @@ bool ExtendedShannonRule::print(std::ostream& out, const ExtendedShannonVar* var
             continue;
         }
         print_coeff(out, scale * v, first);
-        out << ExtendedShannonVar {cmi, random_var_names, scenario_names, implicits};
+        out << ExtendedShannonVar {cmi, var_names_by_scenario, scenario_names, implicits};
         first = false;
     }
 
@@ -2156,8 +2242,6 @@ OrderedSimplifiedShannonProof SimplifiedShannonProof::order() const
 {
     if (!*this)
         return OrderedSimplifiedShannonProof();
-
-    const ImplicitRules& implicits = *variables[0].implicits;
 
     OsiClpSolverInterface si;
     CoinOsiProblem coin(si, true);
@@ -2187,7 +2271,7 @@ OrderedSimplifiedShannonProof SimplifiedShannonProof::order() const
                 },
                 [&](const ExtendedShannonRule& r)
                 {
-                    return r.get_constraint(implicits);
+                    return r.get_constraint((*implicits_by_scenario)[r.scenario]);
                 }
             }, regular_constraints[i - 1]);
 

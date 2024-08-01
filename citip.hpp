@@ -405,10 +405,10 @@ namespace std
 }
 
 struct ShannonVar {
-    const std::vector<std::string>& random_var_names;
+    const std::vector<std::vector<std::string>>& var_names_by_scenario;
     const std::vector<std::string>& scenario_names;
     const std::map<int, int>& column_map;
-    const ImplicitRules& implicits;
+    const std::vector<ImplicitRules>& implicits_by_scenario;
 
     struct PrintVarsOut {
         const ShannonVar& parent;
@@ -430,7 +430,7 @@ struct ShannonRule : public CmiTriplet {
 };
 
 struct ExtendedShannonVar : public CmiTriplet {
-    const std::vector<std::string>* random_var_names = nullptr;
+    const std::vector<std::vector<std::string>>* var_names_by_scenario = nullptr;
     const std::vector<std::string>* scenario_names = nullptr;
     const ImplicitRules* implicits = nullptr;
 
@@ -487,6 +487,8 @@ struct SimplifiedShannonProof :
     using Parent::Parent;
 
     OrderedSimplifiedShannonProof order() const;
+
+    const std::vector<ImplicitRules>* implicits_by_scenario = nullptr;
 };
 
 struct ShannonTypeProof : public LinearProof<ShannonVar, ShannonRule>
@@ -520,9 +522,9 @@ class ShannonTypeProblem
     : public LinearProblem
 {
 public:
-    ShannonTypeProblem(std::vector<std::string> random_var_names_,
+    ShannonTypeProblem(std::vector<std::vector<std::string>> var_names_by_scenario_,
                        std::vector<std::string> scenario_names_,
-                       ImplicitRules implicit_function_ofs_,
+                       std::vector<ImplicitRules> implicits_by_scenario,
                        std::vector<SparseVectorT<CmiTriplet>> cmi_constraints_redundant_);
     ShannonTypeProblem(const ParserOutput&);
 
@@ -535,29 +537,32 @@ protected:
     using LinearProblem::prove;
     using LinearProblem::check;
     using LinearProblem::add;
-    void add_elemental_inequalities(int num_vars, int num_scenarios);
+    void add_elemental_inequalities();
 
     MatrixT<CmiTriplet> cmi_constraints;
     MatrixT<CmiTriplet> cmi_constraints_redundant;
-    ImplicitRules implicits;
+    std::vector<ImplicitRules> implicits_by_scenario;
+
     std::map<int, int> column_map;
     std::vector<int> inv_column_map;
 
-    const std::vector<std::string> random_var_names;
     const std::vector<std::string> scenario_names;
+    const std::vector<std::vector<std::string>> var_names_by_scenario;
     std::vector<CmiTriplet> row_to_cmi;
 };
 
 
 class ParserOutput : public ParserCallback
 {
-    int get_var_index(const std::string&);
-    int get_set_index(const ast::VarList&);     // as in 'set of variables'
+    int get_var_index(int scenario, const std::string&);
+    int get_set_index(int scenario, const ast::VarList&);     // as in 'set of variables'
     void add_term(SparseVector&, SparseVectorT<CmiTriplet>&, const ast::Term&,
                   int scenario_wildcard, double scale);
 
-    std::map<std::string, int> vars;
+    std::map<std::tuple<int, std::string>, int> vars_by_scenario;
     std::map<std::string, int> scenarios;
+
+    std::tuple<int, int> scenario_range(const std::string& scenario) const;
 
     enum statement_type
     {
@@ -574,7 +579,7 @@ class ParserOutput : public ParserCallback
     void add_relation(SparseVector, SparseVectorT<CmiTriplet>, bool is_inquiry);
 
     void add_scenario(const std::string&);
-    void add_symbols(const ast::VarList&);
+    void add_symbols(int scenario, const ast::VarList&);
     void add_cmi(SparseVector& v, SparseVectorT<CmiTriplet>& cmi_v,
                  CmiTriplet t, double coeff) const;
 
@@ -587,12 +592,12 @@ class ParserOutput : public ParserCallback
 
 public:
     // consider this read-only
-    std::vector<std::string> var_names;
     std::vector<std::string> scenario_names;
+    std::vector<std::vector<std::string>> var_names_by_scenario;
 
     Matrix inquiries;
     Matrix constraints;
-    ImplicitRules implicits;
+    std::vector<ImplicitRules> implicits_by_scenario;
 
     MatrixT<CmiTriplet> cmi_constraints;
     MatrixT<CmiTriplet> cmi_inquiries;
