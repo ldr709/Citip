@@ -1108,6 +1108,17 @@ LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_r
 
     si->setLogLevel(3);
     si->getModelPtr()->setPerturbation(50);
+
+    if (false)
+    {
+        ClpSolve options;
+        // Use the Idiot presolve with 2000 iterations, or something like that. Not sure which of
+        // these 1200s is needed.
+        options.setPresolveType(ClpSolve::presolveOn, 2000);
+        options.setSpecialOption(1,2,2000);
+        si->setSolveOptions(options);
+    }
+
     si->initialSolve();
 
     if (!si->isProvenOptimal()) {
