@@ -63,10 +63,10 @@ indist\.                               INT_TOKEN(INDIST, 0)
 implicit                               INT_TOKEN(IMPLICIT, 0)
 
  /* Distinguish between entropies and random variables by checking for a following '('. */
-I[[:alnum:]_]*/\(                      STR_TOKEN_SKIP1(MUTUAL_INFORMATION)
-H[[:alnum:]_]*/\(                      STR_TOKEN_SKIP1(ENTROPY)
+I[[:alnum:]_{}\\]*/\(                      STR_TOKEN_SKIP1(MUTUAL_INFORMATION)
+H[[:alnum:]_{}\\]*/\(                      STR_TOKEN_SKIP1(ENTROPY)
 
-[[:alnum:]_]*[[:alpha:]][[:alnum:]_]*  STR_TOKEN(NAME)
+[[:alnum:]_{}\\]*[[:alpha:]{}\\][[:alnum:]_{}\\]*  STR_TOKEN(NAME)
 
 [[:digit:]]+                           STR_TOKEN(INT) /* Delay parsing in case it's a scenario. */
 [[:digit:]]*\.[[:digit:]]+             NUM_TOKEN(NUM)
