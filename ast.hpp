@@ -61,14 +61,18 @@ namespace ast
 
     struct MutualIndependence
     {
-        VarCore sets;
+        VarList scenarios;
+        std::vector<VarList> lists;
         bool implicit;
     };
 
-    typedef VarCore MarkovChain;
+    struct MarkovChain {
+        VarList scenarios;
+        std::vector<VarList> lists;
+    };
 
     struct FunctionOf {
-        std::string scenario;
+        VarList scenarios;
         VarList function, of;
         bool implicit;
     };

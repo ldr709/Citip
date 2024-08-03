@@ -563,6 +563,7 @@ class ParserOutput : public ParserCallback
     std::map<std::string, int> scenarios;
 
     std::tuple<int, int> scenario_range(const std::string& scenario) const;
+    const std::vector<std::string>& scenario_list(const ast::VarList& scenarios) const;
 
     enum statement_type
     {
@@ -579,6 +580,7 @@ class ParserOutput : public ParserCallback
     void add_relation(SparseVector, SparseVectorT<CmiTriplet>, bool is_inquiry);
 
     void add_scenario(const std::string&);
+    void add_scenarios(const ast::VarList&);
     void add_symbols(int scenario, const ast::VarList&);
     void add_cmi(SparseVector& v, SparseVectorT<CmiTriplet>& cmi_v,
                  CmiTriplet t, double coeff) const;

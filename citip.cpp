@@ -467,26 +467,20 @@ void ParserOutput::process()
             },
             [&](const ast::MarkovChain& mc)
             {
-                if (mc.scenario != "")
-                    add_scenario(mc.scenario);
+                add_scenarios(mc.scenarios);
             },
             [&](const ast::MutualIndependence& mi)
             {
-                if (mi.sets.scenario != "")
-                    add_scenario(mi.sets.scenario);
+                add_scenarios(mi.scenarios);
             },
             [&](const ast::FunctionOf& f)
             {
-                if (f.scenario != "")
-                    add_scenario(f.scenario);
+                add_scenarios(f.scenarios);
             },
             [&](const ast::IndistinguishableScenarios& is)
             {
                 for (const auto& group: is)
-                {
-                    for (const auto& sc: group.scenarios)
-                        add_scenario(sc);
-                }
+                    add_scenarios(group.scenarios);
             }
         }, s);
 
@@ -517,20 +511,27 @@ void ParserOutput::process()
             },
             [&](const ast::MarkovChain& mc)
             {
-                for (auto [scenario, last] = scenario_range(mc.scenario); scenario < last; ++scenario)
+                for (const auto& sc: scenario_list(mc.scenarios))
+                {
+                    int scenario = scenarios.at(sc);
                     for (const auto& vl : mc.lists)
                         add_symbols(scenario, vl);
+                }
             },
             [&](const ast::MutualIndependence& mi)
             {
-                for (auto [scenario, last] = scenario_range(mi.sets.scenario); scenario < last; ++scenario)
-                    for (const auto& vl : mi.sets.lists)
+                for (const auto& sc: scenario_list(mi.scenarios))
+                {
+                    int scenario = scenarios.at(sc);
+                    for (const auto& vl : mi.lists)
                         add_symbols(scenario, vl);
+                }
             },
             [&](const ast::FunctionOf& f)
             {
-                for (auto [scenario, last] = scenario_range(f.scenario); scenario < last; ++scenario)
+                for (const auto& sc: scenario_list(f.scenarios))
                 {
+                    int scenario = scenarios.at(sc);
                     add_symbols(scenario, f.function);
                     add_symbols(scenario, f.of);
                 }
@@ -538,9 +539,8 @@ void ParserOutput::process()
             [&](const ast::IndistinguishableScenarios& is)
             {
                 for (const auto& group: is)
-                    for (const auto& sc: group.scenarios)
-                        for (auto [scenario, last] = scenario_range(sc); scenario < last; ++scenario)
-                            add_symbols(scenario, group.view);
+                    for (const auto& sc: scenario_list(group.scenarios))
+                        add_symbols(scenarios.at(sc), group.view);
             }
         }, s);
 
@@ -553,8 +553,9 @@ void ParserOutput::process()
         if (!fo.implicit)
             continue;
 
-        for (auto [scenario, last] = scenario_range(fo.scenario); scenario < last; ++scenario)
+        for (const auto& sc: scenario_list(fo.scenarios))
         {
+            int scenario = scenarios.at(sc);
             int func = get_set_index(scenario, fo.function);
             int of = get_set_index(scenario, fo.of);
             implicits_by_scenario[scenario].funcs.push_back({func, of});
@@ -589,12 +590,13 @@ void ParserOutput::process()
         if (!mi.implicit)
             continue;
 
-        for (auto [scenario, last] = scenario_range(mi.sets.scenario); scenario < last; ++scenario)
+        for (const auto& sc: scenario_list(mi.scenarios))
         {
-            std::vector<int> sets(mi.sets.lists.size());
+            int scenario = scenarios.at(sc);
+            std::vector<int> sets(mi.lists.size());
             for (int i = 0; i < sets.size(); ++i)
                 // Implicit function rules are applied to the independence sets here.
-                sets[i] = get_set_index(scenario, mi.sets.lists[i]);
+                sets[i] = get_set_index(scenario, mi.lists[i]);
 
             std::vector<int> set_forward_unions(sets.size(), 0);
             for (int i = 1; i < sets.size(); ++i)
@@ -619,6 +621,12 @@ void ParserOutput::add_scenario(const std::string& scenario)
     auto [it, inserted] = scenarios.insert({scenario, scenario_names.size()});
     if (inserted)
         scenario_names.push_back(scenario);
+}
+
+void ParserOutput::add_scenarios(const ast::VarList& scenarios)
+{
+    for (const auto& sc: scenarios)
+        add_scenario(sc);
 }
 
 void ParserOutput::add_symbols(int scenario, const ast::VarList& vl)
@@ -651,6 +659,14 @@ std::tuple<int, int> ParserOutput::scenario_range(const std::string& scenario) c
     const int last_scenario = scenario == "" ? scenario_names.size() : first_scenario + 1;
 
     return {first_scenario, last_scenario};
+}
+
+const std::vector<std::string>& ParserOutput::scenario_list(const ast::VarList& scenarios) const
+{
+    if (scenarios.empty() || (scenarios.size() == 1 && scenarios[0] == ""))
+        return scenario_names;
+    else
+        return scenarios;
 }
 
 void ParserOutput::process_statement(const statement& s)
@@ -726,14 +742,14 @@ void ParserOutput::process_mutual_independence(const ast::MutualIndependence& mi
 {
     bool is_inquiry = inquiries.empty();
 
-    for (auto [scenario, last_scenario] = scenario_range(mi.sets.scenario);
-         scenario < last_scenario; ++scenario)
+    for (const auto& sc: scenario_list(mi.scenarios))
     {
+        int scenario = scenarios.at(sc);
         const auto& implicits = implicits_by_scenario[scenario];
 
-        std::vector<int> set_indices(mi.sets.lists.size());
+        std::vector<int> set_indices(mi.lists.size());
         for (int i = 0; i < set_indices.size(); ++i)
-            set_indices[i] = get_set_index(scenario, mi.sets.lists[i]);
+            set_indices[i] = get_set_index(scenario, mi.lists[i]);
 
         auto convert_set = [&](int set)
         {
@@ -849,9 +865,9 @@ void ParserOutput::process_markov_chain(const ast::MarkovChain& mc)
 {
     bool is_inquiry = inquiries.empty();
 
-    for (auto [scenario, last_scenario] = scenario_range(mc.scenario);
-         scenario < last_scenario; ++scenario)
+    for (const auto& sc: scenario_list(mc.scenarios))
     {
+        int scenario = scenarios.at(sc);
         const auto& implicits = implicits_by_scenario[scenario];
 
         int a = 0;
@@ -878,9 +894,9 @@ void ParserOutput::process_function_of(const ast::FunctionOf& fo)
 
     bool is_inquiry = inquiries.empty();
 
-    for (auto [scenario, last_scenario] = scenario_range(fo.scenario);
-         scenario < last_scenario; ++scenario)
+    for (const auto& sc: scenario_list(fo.scenarios))
     {
+        int scenario = scenarios.at(sc);
         const auto& implicits = implicits_by_scenario[scenario];
 
         int func = get_set_index(scenario, fo.function);

@@ -45,7 +45,7 @@
 %type <ast::Relation>                   inform_inequ
 %type <ast::MutualIndependence>         mutual_indep
 %type <std::vector<ast::VarList>>       mutual_indep_list
-%type <ast::VarCore>                    markov_chain
+%type <ast::MarkovChain>                markov_chain
 %type <std::vector<ast::VarList>>       markov_chain_list
 %type <ast::FunctionOf>                 determ_depen
 %type <bool>                            maybe_implicit
@@ -54,13 +54,12 @@
 %type <ast::Quantity>                   inform_quant
 %type <ast::Quantity>                   entropy
 %type <ast::Quantity>                   mutual_inf
-%type <ast::VarList>                    var_list
+%type <ast::VarList>                    name_list
 %type <std::vector<ast::VarList>>       mut_inf_core;
-%type <std::string>                     scenario;
+%type <std::string>                     name;
 %type <ast::IndistinguishableScenarios> indist;
 %type <ast::IndistinguishableScenarios> indist_list;
 %type <ast::IndistinguishableScenario>  indist_item;
-%type <ast::VarList>                    scenario_list;
 
 %start statement
 
@@ -121,42 +120,39 @@ statement    : %empty           { /* allow empty (or pure comment) lines */ }
 
     /* statements */
 
-inform_inequ      : inform_expr REL inform_expr                        { $$ = {$1, $2, $3}; }
+inform_inequ      : inform_expr REL inform_expr                               { $$ = {$1, $2, $3}; }
                   ;
 
-markov_chain      : markov_chain_list                                  { $$ = {"", $1}; }
-                  | scenario ';' markov_chain_list                     { $$ = {$1, $3}; }
+markov_chain      : markov_chain_list                                         { $$ = {{}, $1}; }
+                  | name_list ':' markov_chain_list                           { $$ = {$1, $3}; }
                   ;
 
-markov_chain_list : markov_chain_list '/' var_list                     { $$ = enlist($1, $3); }
-                  | var_list '/' var_list '/' var_list                 { $$ = {$1, $3, $5}; }
+markov_chain_list : markov_chain_list '/' name_list                           { $$ = enlist($1, $3); }
+                  | name_list '/' name_list '/' name_list                     { $$ = {$1, $3, $5}; }
                   ;
 
-mutual_indep      : mutual_indep_list maybe_implicit                   { $$ = {{"", $1}, $2}; }
-                  | scenario ';' mutual_indep_list maybe_implicit      { $$ = {{$1, $3}, $4}; }
+mutual_indep      : mutual_indep_list maybe_implicit                          { $$ = {{}, $1, $2}; }
+                  | name_list ':' mutual_indep_list maybe_implicit            { $$ = {$1, $3, $4}; }
                   ;
 
-mutual_indep_list : mutual_indep_list '.' var_list                     { $$ = enlist($1, $3); }
-                  |     var_list '.' var_list                          { $$ = {$1, $3}; }
+mutual_indep_list : mutual_indep_list '.' name_list                           { $$ = enlist($1, $3); }
+                  |         name_list '.' name_list                           { $$ = {$1, $3}; }
                   ;
 
-determ_depen      : var_list ':' var_list maybe_implicit               { $$ = {"", $1, $3, $4}; }
-                  | scenario ';' var_list ':' var_list maybe_implicit  { $$ = {$1, $3, $5, $6}; }
+determ_depen      : name_list '<' '-' name_list maybe_implicit                { $$ = {{}, $1, $4, $5}; }
+                  | name_list ':' name_list '<' '-' name_list maybe_implicit  { $$ = {$1, $3, $6, $7}; }
                   ;
 
-indist            : INDIST indist_list                                 { $$ = $2; }
-                  | INDIST ';' var_list                                { $$ = {{{}, $3}}; }
+indist            : INDIST indist_list                                        { $$ = $2; }
+                  | INDIST name_list                                          { $$ = {{{}, $2}}; }
+                  | INDIST ':' name_list                                      { $$ = {{{}, $3}}; }
                   ;
 
-indist_list       : indist_list ':' indist_item                        { $$ = enlist($1, $3); }
-                  | indist_item                                        { $$ = {$1}; }
+indist_list       : indist_list ';' indist_item                               { $$ = enlist($1, $3); }
+                  | indist_item                                               { $$ = {$1}; }
                   ;
 
-indist_item       : scenario_list ';' var_list                         { $$ = {$1, $3}; }
-                  ;
-
-scenario_list     : scenario_list ',' scenario                         { $$ = enlist($1, $3); }
-                  | scenario                                           { $$ = {$1}; }
+indist_item       : name_list ':' name_list                                   { $$ = {$1, $3}; }
                   ;
 
     /* building blocks */
@@ -177,27 +173,23 @@ inform_quant   : entropy                          { $$ = $1; }
                | mutual_inf                       { $$ = $1; }
                ;
 
-entropy        : ENTROPY '(' var_list              ')'      { $$ = {{$1, {$3}}}; }
-               | ENTROPY '(' var_list '|' var_list ')'      { $$ = {{$1, {$3}}, $5}; }
+entropy        : ENTROPY '(' name_list              ')'      { $$ = {{$1, {$3}}}; }
+               | ENTROPY '(' name_list '|' name_list ')'      { $$ = {{$1, {$3}}, $5}; }
                ;
 
 mutual_inf     : MUTUAL_INFORMATION '(' mut_inf_core              ')'  { $$ = {{$1, $3}}; }
-               | MUTUAL_INFORMATION '(' mut_inf_core '|' var_list ')'  { $$ = {{$1, $3}, $5}; }
+               | MUTUAL_INFORMATION '(' mut_inf_core '|' name_list ')'  { $$ = {{$1, $3}, $5}; }
                ;
 
-mut_inf_core   :  mut_inf_core colon var_list     { $$ = enlist($1, $3); }
-               |      var_list colon var_list     { $$ = {$1, $3}; }
+mut_inf_core   :  mut_inf_core ';' name_list     { $$ = enlist($1, $3); }
+               |      name_list ';' name_list     { $$ = {$1, $3}; }
                ;
 
-colon          : ':'
-               | ';'
+name_list      : name_list ',' name               { $$ = enlist($1, $3); }
+               |               name               { $$ = {$1}; }
                ;
 
-var_list       : var_list ',' NAME                { $$ = enlist($1, $3); }
-               |              NAME                { $$ = {$1}; }
-               ;
-
-scenario       : NAME                             { $$ = $1; }
+name           : NAME                             { $$ = $1; }
                | INT                              { $$ = $1; }
                ;
 
