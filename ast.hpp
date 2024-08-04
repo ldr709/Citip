@@ -6,6 +6,7 @@
 // input statements.
 
 # include <string>
+# include <variant>
 # include <vector>
 
 
@@ -31,11 +32,20 @@ namespace ast
         std::vector<VarList> lists;
     };
 
-    struct Quantity
+    struct EntropyQuantity
     {
         VarCore parts;
         VarList cond;
     };
+
+    struct VariableQuantity
+    {
+        std::string name;
+    };
+
+    struct ConstantQuantity {};
+
+    typedef std::variant<EntropyQuantity, VariableQuantity, ConstantQuantity> Quantity;
 
     struct Term
     {

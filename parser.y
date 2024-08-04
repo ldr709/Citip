@@ -52,8 +52,8 @@
 %type <ast::Expression>                 inform_expr
 %type <ast::Term>                       inform_term
 %type <ast::Quantity>                   inform_quant
-%type <ast::Quantity>                   entropy
-%type <ast::Quantity>                   mutual_inf
+%type <ast::EntropyQuantity>            entropy
+%type <ast::EntropyQuantity>            mutual_inf
 %type <ast::VarList>                    name_list
 %type <std::vector<ast::VarList>>       mut_inf_core;
 %type <std::string>                     name;
@@ -165,8 +165,11 @@ inform_expr    : inform_expr SIGN inform_term     { $$ = enlist($1, $3.flip_sign
 inform_term    : INT inform_quant                 { $$ = {std::stod($1), $2}; }
                | NUM inform_quant                 { $$ = {$1, $2}; }
                |     inform_quant                 { $$ = { 1, $1}; }
-               | INT                              { $$ = {std::stod($1)}; }
-               | NUM                              { $$ = {$1}; }
+               | INT NAME                         { $$ = {std::stod($1), ast::VariableQuantity{$2}}; }
+               | NUM NAME                         { $$ = {$1, ast::VariableQuantity{$2}}; }
+               |     NAME                         { $$ = { 1, ast::VariableQuantity{$1}}; }
+               | INT                              { $$ = {std::stod($1), ast::ConstantQuantity{}}; }
+               | NUM                              { $$ = {$1, ast::ConstantQuantity{}}; }
                ;
 
 inform_quant   : entropy                          { $$ = $1; }

@@ -198,6 +198,19 @@ bool CmiTriplet::is_zero() const
     return t[0] == 0 || t[1] == 0;
 }
 
+bool ExtendedShannonVar::is_zero() const
+{
+    return real_var < 0 && CmiTriplet::is_zero();
+}
+
+ExtendedShannonVar::operator std::variant<CmiTriplet, int>() const
+{
+    if (real_var < 0)
+        return *(CmiTriplet*) this;
+    else
+        return real_var;
+}
+
 static inline int scenario_var(
     const ImplicitRules& implicits, const std::vector<std::vector<std::string>>& var_names_by_scenario,
     int scenario, int a)
@@ -211,6 +224,13 @@ static inline int scenario_var(
 
 void ShannonTypeProblem::add_columns()
 {
+    for (int v = 0; v < real_var_names.size(); ++v)
+    {
+        int c = column_map.size();
+        column_map[-v - 1] = c;
+        inv_column_map.push_back(-v - 1);
+    }
+
     for (int scenario = 0; scenario < scenario_names.size(); ++scenario)
     {
         for (int i = 1; i < (1<<var_names_by_scenario[scenario].size()); ++i)
@@ -324,16 +344,26 @@ void ShannonTypeProblem::add_elemental_inequalities()
 // ParserOutput
 //----------------------------------------
 
-void ParserOutput::add_term(SparseVector& v, SparseVectorT<CmiTriplet>& cmi_v,
+void ParserOutput::add_term(SparseVector& v, SparseVectorT<Symbol>& cmi_v,
                             const ast::Term& t, int scenario_wildcard, double scale)
 {
-    const ast::Quantity& q = t.quantity;
     double coef = scale * t.coefficient;
-    int num_parts = q.parts.lists.size();
-    if (num_parts == 0) {   // constant
+    if (std::holds_alternative<ast::ConstantQuantity>(t.quantity)) {
         v.inc(0, coef);
         return;
     }
+
+    if (const auto* var = std::get_if<ast::VariableQuantity>(&t.quantity))
+    {
+        // A real valued variables, rather than an entropy.
+        int var_i = get_real_var_index(var->name);
+        v.inc(-var_i - 1, coef);
+        cmi_v.inc(var_i, coef);
+        return;
+    }
+
+    const auto& q = std::get<ast::EntropyQuantity>(t.quantity);
+    int num_parts = q.parts.lists.size();
 
     const int scenario = q.parts.scenario == "" ? scenario_wildcard : scenarios.at(q.parts.scenario);
 
@@ -409,6 +439,17 @@ int ParserOutput::get_var_index(int scenario, const std::string& s)
     return next_index;
 }
 
+int ParserOutput::get_real_var_index(const std::string& name)
+{
+    auto&& it = real_vars.find(name);
+    if (it != real_vars.end())
+        return it->second;
+    int next_index = real_var_names.size();
+    real_vars[name] = next_index;
+    real_var_names.push_back(name);
+    return next_index;
+}
+
 int ParserOutput::get_set_index(int scenario, const ast::VarList& l)
 {
     int idx = 0;
@@ -417,7 +458,7 @@ int ParserOutput::get_set_index(int scenario, const ast::VarList& l)
     return apply_implicits(implicits_by_scenario[scenario], idx);
 }
 
-void ParserOutput::add_relation(SparseVector v, SparseVectorT<CmiTriplet> cmi_v, bool is_inquiry)
+void ParserOutput::add_relation(SparseVector v, SparseVectorT<Symbol> cmi_v, bool is_inquiry)
 {
     if (is_inquiry)
     {
@@ -462,8 +503,9 @@ void ParserOutput::process()
             {
                 for (const ast::Expression& side : {r.left, r.right})
                     for (const auto& term : side)
-                        if (term.quantity.parts.scenario != "")
-                            add_scenario(term.quantity.parts.scenario);
+                        if (const auto* q = std::get_if<ast::EntropyQuantity>(&term.quantity))
+                            if (q->parts.scenario != "")
+                                add_scenario(q->parts.scenario);
             },
             [&](const ast::MarkovChain& mc)
             {
@@ -499,13 +541,23 @@ void ParserOutput::process()
                 {
                     for (const auto& term : side)
                     {
-                        for (auto [scenario, last] = scenario_range(term.quantity.parts.scenario);
-                             scenario < last; ++scenario)
-                        {
-                            for (const auto& vl : term.quantity.parts.lists)
-                                add_symbols(scenario, vl);
-                            add_symbols(scenario, term.quantity.cond);
-                        }
+                        std::visit(overload {
+                            [&](const ast::EntropyQuantity& q)
+                            {
+                                for (auto [scenario, last] = scenario_range(q.parts.scenario);
+                                     scenario < last; ++scenario)
+                                {
+                                    for (const auto& vl : q.parts.lists)
+                                        add_vars(scenario, vl);
+                                    add_vars(scenario, q.cond);
+                                }
+                            },
+                            [&](const ast::VariableQuantity& var)
+                            {
+                                add_real_var(var.name);
+                            },
+                            [&](const ast::ConstantQuantity& mi) {}
+                        }, term.quantity);
                     }
                 }
             },
@@ -515,7 +567,7 @@ void ParserOutput::process()
                 {
                     int scenario = scenarios.at(sc);
                     for (const auto& vl : mc.lists)
-                        add_symbols(scenario, vl);
+                        add_vars(scenario, vl);
                 }
             },
             [&](const ast::MutualIndependence& mi)
@@ -524,7 +576,7 @@ void ParserOutput::process()
                 {
                     int scenario = scenarios.at(sc);
                     for (const auto& vl : mi.lists)
-                        add_symbols(scenario, vl);
+                        add_vars(scenario, vl);
                 }
             },
             [&](const ast::FunctionOf& f)
@@ -532,15 +584,15 @@ void ParserOutput::process()
                 for (const auto& sc: scenario_list(f.scenarios))
                 {
                     int scenario = scenarios.at(sc);
-                    add_symbols(scenario, f.function);
-                    add_symbols(scenario, f.of);
+                    add_vars(scenario, f.function);
+                    add_vars(scenario, f.of);
                 }
             },
             [&](const ast::IndistinguishableScenarios& is)
             {
                 for (const auto& group: is)
                     for (const auto& sc: scenario_list(group.scenarios))
-                        add_symbols(scenarios.at(sc), group.view);
+                        add_vars(scenarios.at(sc), group.view);
             }
         }, s);
 
@@ -629,13 +681,18 @@ void ParserOutput::add_scenarios(const ast::VarList& scenarios)
         add_scenario(sc);
 }
 
-void ParserOutput::add_symbols(int scenario, const ast::VarList& vl)
+void ParserOutput::add_vars(int scenario, const ast::VarList& vl)
 {
     for (auto&& v : vl)
         get_var_index(scenario, v);
 }
 
-void ParserOutput::add_cmi(SparseVector& v, SparseVectorT<CmiTriplet>& cmi_v,
+void ParserOutput::add_real_var(const std::string& name)
+{
+    get_real_var_index(name);
+}
+
+void ParserOutput::add_cmi(SparseVector& v, SparseVectorT<Symbol>& cmi_v,
                            CmiTriplet t, double coeff) const
 {
     const auto& implicits = implicits_by_scenario[t.scenario];
@@ -706,10 +763,13 @@ void ParserOutput::process_relation(const ast::Relation& re)
     {
         for (const auto& term : side)
         {
-            if (!term.quantity.parts.lists.empty() && term.quantity.parts.scenario == "")
+            if (const auto* q = std::get_if<ast::EntropyQuantity>(&term.quantity))
             {
-                has_wildcard_scenario = true;
-                goto done;
+                if (!q->parts.lists.empty() && q->parts.scenario == "")
+                {
+                    has_wildcard_scenario = true;
+                    goto done;
+                }
             }
         }
     }
@@ -728,7 +788,7 @@ done:
         int l_sign = re.relation == ast::REL_LE ? -1 : 1;
         int r_sign = -l_sign;
         SparseVector v;
-        SparseVectorT<CmiTriplet> cmi_v;
+        SparseVectorT<Symbol> cmi_v;
         cmi_v.is_equality = v.is_equality = (re.relation == ast::REL_EQ);
         for (auto&& term : re.left)
             add_term(v, cmi_v, term, wildcard_scenario, l_sign);
@@ -776,7 +836,7 @@ void ParserOutput::process_mutual_independence(const ast::MutualIndependence& mi
 
             int all = 0;
             SparseVector v;
-            SparseVectorT<CmiTriplet> cmi_v;
+            SparseVectorT<Symbol> cmi_v;
             cmi_v.is_equality = v.is_equality = true;
             for (auto subset : subsets) {
                 // Check if subset contains the sentinal element saying that this subset is left out
@@ -851,9 +911,9 @@ void ParserOutput::process_mutual_independence(const ast::MutualIndependence& mi
                     if (!added_rules.insert(cmi).second)
                         continue;
 
-                    SparseVectorT<CmiTriplet> cmi_v;
-                    cmi_v.is_equality = true;
-                    cmi_v.inc(cmi, 1.0);
+                    SparseVectorT<Symbol> cmi_v;
+                    cmi_v.is_equality = false;
+                    cmi_v.inc(cmi, -1.0);
                     cmi_constraints_redundant.push_back(move(cmi_v));
                 }
             }
@@ -878,7 +938,7 @@ void ParserOutput::process_markov_chain(const ast::MarkovChain& mc)
             c = get_set_index(scenario, mc.lists[i+2]);
             // 0 = I(a:c|b) = H(a|b) + H(c|b) - H(a,c|b)
             SparseVector v;
-            SparseVectorT<CmiTriplet> cmi_v;
+            SparseVectorT<Symbol> cmi_v;
             cmi_v.is_equality = v.is_equality = true;
             add_cmi(v, cmi_v, CmiTriplet(implicits, a,c,b, scenario), 1);
             add_relation(move(v), move(cmi_v), is_inquiry);
@@ -904,7 +964,7 @@ void ParserOutput::process_function_of(const ast::FunctionOf& fo)
 
         // 0 = H(func|of) = H(func,of) - H(of)
         SparseVector v;
-        SparseVectorT<CmiTriplet> cmi_v;
+        SparseVectorT<Symbol> cmi_v;
         cmi_v.is_equality = v.is_equality = true;
         add_cmi(v, cmi_v, CmiTriplet(implicits, func,func,of,scenario), 1);
         add_relation(move(v), move(cmi_v), is_inquiry);
@@ -952,7 +1012,7 @@ void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
                     continue;
 
                 SparseVector v;
-                SparseVectorT<CmiTriplet> cmi_v;
+                SparseVectorT<Symbol> cmi_v;
                 cmi_v.is_equality = v.is_equality = true;
                 add_cmi(v, cmi_v, cmi0, 1.0);
                 add_cmi(v, cmi_v, cmi1, -1.0);
@@ -996,7 +1056,7 @@ void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
                     if (!added_rules.insert({cmi0[0], cmi0[1], cmi0[2], cmi1[0], cmi1[1], cmi1[2]}).second)
                         continue;
 
-                    SparseVectorT<CmiTriplet> cmi_v;
+                    SparseVectorT<Symbol> cmi_v;
                     cmi_v.is_equality = true;
                     cmi_v.inc(cmi0, 1.0);
                     cmi_v.inc(cmi1, -1.0);
@@ -1251,11 +1311,13 @@ LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_r
 
 ShannonTypeProblem::ShannonTypeProblem(std::vector<std::vector<std::string>> var_names_by_scenario_,
                                        std::vector<std::string> scenario_names_,
+                                       std::vector<std::string> real_var_names_,
                                        std::vector<ImplicitRules> implicits_by_scenario_,
-                                       std::vector<SparseVectorT<CmiTriplet>> cmi_constraints_redundant_) :
+                                       MatrixT<Symbol> cmi_constraints_redundant_) :
     LinearProblem(),
     var_names_by_scenario(move(var_names_by_scenario_)),
     scenario_names(move(scenario_names_)),
+    real_var_names(move(real_var_names_)),
     implicits_by_scenario(move(implicits_by_scenario_)),
     cmi_constraints_redundant(cmi_constraints_redundant_)
 {
@@ -1267,14 +1329,14 @@ ShannonTypeProblem::ShannonTypeProblem(std::vector<std::vector<std::string>> var
 }
 
 ShannonTypeProblem::ShannonTypeProblem(const ParserOutput& out) :
-    ShannonTypeProblem(out.var_names_by_scenario, out.scenario_names,
+    ShannonTypeProblem(out.var_names_by_scenario, out.scenario_names, out.real_var_names,
                        out.implicits_by_scenario, out.cmi_constraints_redundant)
 {
     for (int i = 0; i < out.constraints.size(); ++i)
         add(out.constraints[i], out.cmi_constraints[i]);
 }
 
-void ShannonTypeProblem::add(const SparseVector& v, SparseVectorT<CmiTriplet> cmi_v)
+void ShannonTypeProblem::add(const SparseVector& v, SparseVectorT<Symbol> cmi_v)
 {
     SparseVector realV;
     realV.is_equality = v.is_equality;
@@ -1314,7 +1376,10 @@ std::ostream& operator<<(std::ostream& out, const ShannonVar::PrintVarsOut& pvo)
 
 std::ostream& operator<<(std::ostream& out, const ShannonVar& sv)
 {
-    return out << 'H' << sv.scenario() << '(' << sv.print_vars() << ')';
+    if (sv.v >= 0) // Entropy variable
+        return out << 'H' << sv.scenario() << '(' << sv.print_vars() << ')';
+    else
+        return out << sv.real_var_names[-sv.v - 1];
 }
 
 bool ShannonRule::print(std::ostream& out, const ShannonVar* vars, double scale) const
@@ -1327,12 +1392,12 @@ bool ShannonRule::print(std::ostream& out, const ShannonVar* vars, double scale)
         return false;
 
     print_coeff(out, scale, true);
-    out << ExtendedShannonVar {*this, var_names_by_scenario, scenario_names, implicits};
+    out << ExtendedShannonVar {*this, var_names_by_scenario, scenario_names, nullptr, implicits};
     out << " >= 0";
     return true;
 }
 
-ShannonTypeProof ShannonTypeProblem::prove(const SparseVector& I, SparseVectorT<CmiTriplet> cmi_I)
+ShannonTypeProof ShannonTypeProblem::prove(const SparseVector& I, SparseVectorT<Symbol> cmi_I)
 {
     SparseVector realObj;
     realObj.is_equality = I.is_equality;
@@ -1345,7 +1410,8 @@ ShannonTypeProof ShannonTypeProblem::prove(const SparseVector& I, SparseVectorT<
         [&] (const LinearVariable& v)
         {
             return ShannonVar{
-                var_names_by_scenario, scenario_names, column_map, implicits_by_scenario, inv_column_map[v.id]
+                var_names_by_scenario, scenario_names, real_var_names,
+                column_map, implicits_by_scenario, inv_column_map[v.id]
             };
         },
         [&] (const NonNegativityOrOtherRule<CmiTriplet>& r) -> ShannonRule {
@@ -1371,6 +1437,7 @@ struct ShannonProofSimplifier
 {
     friend struct ExtendedShannonRule;
     typedef ExtendedShannonRule Rule;
+    typedef ShannonTypeProof::Symbol Symbol;
 
     ShannonProofSimplifier() = delete;
     ShannonProofSimplifier(const ShannonTypeProof&);
@@ -1386,6 +1453,7 @@ private:
     void add_adjacent_rules_quadratic(CmiTriplet);
 
     static double custom_rule_complexity_cost(const SparseVectorT<CmiTriplet>&);
+    static double custom_rule_complexity_cost(const SparseVectorT<Symbol>&);
 
     // How much to use each type of (in)equality:
     std::map<CmiTriplet, double> cmi_coefficients;
@@ -1395,19 +1463,20 @@ private:
     double cost;
 
     const ShannonTypeProof& orig_proof;
-    MatrixT<CmiTriplet> cmi_constraints;
+    MatrixT<Symbol> cmi_constraints;
 
-    std::map<CmiTriplet, int> cmi_indices; // rows represent conditional mutual informations.
-    int get_row_index(CmiTriplet t);
+    std::map<Symbol, int> cmi_indices; // rows represent conditional mutual informations.
+    int get_row_index(Symbol t, bool allow_equality = true);
 
     std::map<Rule, int> rule_indices;
     int add_rule(const Rule& r);
-    int add_constraint(const SparseVectorT<CmiTriplet>& c, double cost = 0.0);
+    int add_constraint(const SparseVectorT<Symbol>& c, double cost = 0.0);
 
     CoinOsiProblem coin;
 
     const std::vector<ImplicitRules>& implicits_by_scenario;
     const std::vector<std::vector<std::string>>& var_names_by_scenario;
+    const std::vector<std::string>& real_var_names;
     const std::vector<std::string>& scenario_names;
 };
 
@@ -1540,6 +1609,7 @@ const double information_cost                    = 1.0;
 const double conditional_information_cost        = 1.1;
 const double mutual_information_cost             = 1.5;
 const double conditional_mutual_information_cost = 1.6;
+const double real_var_cost                       = 0.5;
 
 // Cost of using the bound I(a;b|c) >= 0 where t == (a, b, c).
 double CmiTriplet::complexity_cost() const
@@ -1566,11 +1636,34 @@ double ExtendedShannonRule::complexity_cost(const ImplicitRules& implicits) cons
     return ShannonProofSimplifier::custom_rule_complexity_cost(get_constraint(implicits));
 }
 
+static double complexity_cost(std::variant<CmiTriplet, int> s)
+{
+    return std::visit(overload {
+        [&](const CmiTriplet& cmi)
+        {
+            return cmi.complexity_cost();
+        },
+        [&](const int& v)
+        {
+            return real_var_cost;
+        }
+    }, s);
+}
+
 double ShannonProofSimplifier::custom_rule_complexity_cost(const SparseVectorT<CmiTriplet>& c)
+{
+    SparseVectorT<Symbol> constraint;
+    constraint.is_equality = c.is_equality;
+    for (const auto& [cmi, v] : c.entries)
+        constraint.entries[cmi] = v;
+    return custom_rule_complexity_cost(constraint);
+}
+
+double ShannonProofSimplifier::custom_rule_complexity_cost(const SparseVectorT<Symbol>& c)
 {
     double cost = 0.0;
     for (const auto& [cmi, v] : c.entries)
-        cost += cmi.complexity_cost();
+        cost += complexity_cost(cmi);
 
     // Cost for adding more rules, even if they are simple.
     return cost + rule_cost;
@@ -1651,17 +1744,17 @@ int ShannonProofSimplifier::add_rule(const Rule& r)
     if (!inserted)
         return idx;
 
-    auto constraint = r.get_constraint(implicits_by_scenario[r.scenario]);
+    auto constraint_cmi = r.get_constraint(implicits_by_scenario[r.scenario]);
 
     // Don't add trivial rules. Also, don't add rules that are identical to just CMI >= 0 rules.
     bool skip = true;
-    for (const auto& [cmi, v] : constraint.entries)
-        if (!cmi.is_zero() && (v < 0.0 || constraint.is_equality))
+    for (const auto& [cmi, v] : constraint_cmi.entries)
+        if (!cmi.is_zero() && (v < 0.0 || constraint_cmi.is_equality))
         {
             skip = false;
             break;
         }
-    skip = (skip || r.is_trivial(constraint));
+    skip = (skip || r.is_trivial(constraint_cmi));
 
     if (skip)
     {
@@ -1669,11 +1762,15 @@ int ShannonProofSimplifier::add_rule(const Rule& r)
         return -1;
     }
 
+    SparseVectorT<Symbol> constraint;
+    constraint.is_equality = constraint_cmi.is_equality;
+    for (const auto& [cmi, v] : constraint_cmi.entries)
+        constraint.entries[cmi] = v;
     add_constraint(constraint);
     return idx;
 }
 
-int ShannonProofSimplifier::add_constraint(const SparseVectorT<CmiTriplet>& c, double cost)
+int ShannonProofSimplifier::add_constraint(const SparseVectorT<Symbol>& c, double cost)
 {
     bool eq = c.is_equality;
 
@@ -1692,7 +1789,7 @@ int ShannonProofSimplifier::add_constraint(const SparseVectorT<CmiTriplet>& c, d
     return idx;
 }
 
-int ShannonProofSimplifier::get_row_index(CmiTriplet t)
+int ShannonProofSimplifier::get_row_index(Symbol t, bool allow_equality)
 {
     auto [it, inserted] = cmi_indices.insert(std::make_pair(t, coin.num_rows));
     int idx = it->second;
@@ -1700,6 +1797,8 @@ int ShannonProofSimplifier::get_row_index(CmiTriplet t)
         return idx;
 
     coin.add_row_ub(0.0);
+    if (allow_equality && std::holds_alternative<int>(t))
+        coin.add_row_lb(0.0);
     return idx;
 }
 
@@ -1707,6 +1806,7 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
     orig_proof(orig_proof_),
     var_names_by_scenario(orig_proof.variables[0].var_names_by_scenario),
     scenario_names(orig_proof.variables[0].scenario_names),
+    real_var_names(orig_proof.variables[0].real_var_names),
     implicits_by_scenario(orig_proof.variables[0].implicits_by_scenario),
     cmi_constraints(orig_proof.cmi_constraints)
 {
@@ -1740,15 +1840,17 @@ ShannonProofSimplifier::ShannonProofSimplifier(const ShannonTypeProof& orig_proo
             custom_rule_coefficients[j] = coeff;
 
             const auto& c = cmi_constraints[j];
-            for (const auto& [cmi, v] : c.entries)
-                cmi_usage.inc(cmi, coeff * v);
+            for (const auto& [s, v] : c.entries)
+                if (const auto* cmi = std::get_if<CmiTriplet>(&s))
+                    cmi_usage.inc(*cmi, coeff * v);
             cost += std::abs(coeff) * custom_rule_complexity_cost(c);
         }
     }
 
     // Also use the original CMI representation of the objective.
-    for (const auto& [cmi, v] : orig_proof.cmi_objective.entries)
-        cmi_usage.inc(cmi, v);
+    for (const auto& [s, v] : orig_proof.cmi_objective.entries)
+        if (const auto* cmi = std::get_if<CmiTriplet>(&s))
+            cmi_usage.inc(*cmi, v);
 
     // Add rules to convert every CMI into individual entropies.
     for (const auto& [t, v] : cmi_usage.entries)
@@ -1960,16 +2062,18 @@ bool ShannonProofSimplifier::simplify(int depth)
 
         // TODO: can probably reduce the problem size using some kind of MITM, by only adding rules
         // that can map back to two different original CMI triplets.
-        std::map<CmiTriplet, int> prev_prev_cmi;
+        std::map<Symbol, int> prev_prev_cmi;
         for (int i = 0; i < depth; ++i)
         {
-            std::map<CmiTriplet, int> prev_cmi = cmi_indices;
+            std::map<Symbol, int> prev_cmi = cmi_indices;
 
-            for (auto [cmi, v] : prev_cmi)
-                add_adjacent_rules(cmi);
+            for (auto [s, v] : prev_cmi)
+                if (const auto* cmi = std::get_if<CmiTriplet>(&s))
+                    add_adjacent_rules(*cmi);
             if (i > 0)
-                for (auto [cmi, v] : prev_prev_cmi)
-                    add_adjacent_rules_quadratic(cmi);
+                for (auto [s, v] : prev_prev_cmi)
+                    if (const auto* cmi = std::get_if<CmiTriplet>(&s))
+                        add_adjacent_rules_quadratic(*cmi);
 
             prev_prev_cmi = std::move(prev_cmi);
         }
@@ -2030,7 +2134,7 @@ bool ShannonProofSimplifier::simplify(int depth)
     std::vector<double> row_obj(coin.num_rows, 0.0);
     for (auto [t, row] : cmi_indices)
     {
-        double cost = t.complexity_cost() + rule_cost;
+        double cost = complexity_cost(t) + rule_cost;
         row_obj[row] -= cost;
         obj_offset += cost * coin.rowub[row];
     }
@@ -2068,8 +2172,13 @@ bool ShannonProofSimplifier::simplify(int depth)
 
     for (auto [t, i] : cmi_indices)
     {
-        double v = cmi_coefficients.contains(t) ? cmi_coefficients.at(t) : 0.0;
-        rstat[i] = v > 0.0 ? 1 : 3; // At upper bound, but 2 and 3 are swapped for rows.
+        if (const auto* cmi = std::get_if<CmiTriplet>(&t))
+        {
+            double v = cmi_coefficients.contains(*cmi) ? cmi_coefficients.at(*cmi) : 0.0;
+            rstat[i] = v > 0.0 ? 1 : 3; // At upper bound, but 2 and 3 are swapped for rows.
+        }
+        else
+            rstat[const_row] = 2; // Could be either 2 or 3, because this is a fixed variable.
     }
 
     rstat[const_row] = 2; // Could be either 2 or 3, because this is a fixed variable.
@@ -2105,9 +2214,12 @@ bool ShannonProofSimplifier::simplify(int depth)
 
     for (auto [t, row] : cmi_indices)
     {
-        double coeff = coin.rowub[row] - row_sol[row];
-        if (std::abs(coeff) > eps)
-            cmi_coefficients[t] = coeff;
+        if (const auto* cmi = std::get_if<CmiTriplet>(&t))
+        {
+            double coeff = coin.rowub[row] - row_sol[row];
+            if (std::abs(coeff) > eps)
+                cmi_coefficients[*cmi] = coeff;
+        }
     }
 
     for (auto [r, col] : rule_indices)
@@ -2155,13 +2267,13 @@ ShannonProofSimplifier::operator SimplifiedShannonProof()
 
     for (auto [t, v] : cmi_coefficients)
     {
-        int idx = get_row_index(t);
+        int idx = get_row_index(t, false);
         proof.regular_constraints.emplace_back(
             NonNegativityOrOtherRule<Rule>::Parent(std::in_place_index_t<0>(), idx));
         proof.dual_solution.inc(idx + 1, v);
     }
-
     int n = coin.num_rows;
+
     for (auto [r, v] : rule_coefficients)
     {
         proof.regular_constraints.emplace_back(
@@ -2169,7 +2281,7 @@ ShannonProofSimplifier::operator SimplifiedShannonProof()
 
         auto c = r.get_constraint(implicits_by_scenario[r.scenario]);
         for (const auto& [cmi, v] : c.entries)
-            get_row_index(cmi);
+            get_row_index(cmi, false);
 
         proof.dual_solution.inc(++n, v);
     }
@@ -2185,14 +2297,31 @@ ShannonProofSimplifier::operator SimplifiedShannonProof()
         if (i < orig_proof.custom_constraints.size())
             constraint.inc(0, orig_proof.custom_constraints[i].get(0));
         for (const auto& [cmi, v2] : orig_constraint.entries)
-            constraint.inc(get_row_index(cmi) + 1, v2);
+            constraint.inc(get_row_index(cmi, false) + 1, v2);
 
         proof.dual_solution.inc(++n, v);
     }
 
     proof.variables.resize(coin.num_rows);
     for (auto [t, i] : cmi_indices)
-        proof.variables[i] = ExtendedShannonVar{t, &var_names_by_scenario, &scenario_names, &implicits_by_scenario[t.scenario]};
+    {
+        proof.variables[i] = std::visit(overload {
+            [&](const CmiTriplet& cmi)
+            {
+                return ExtendedShannonVar{
+                    cmi, &var_names_by_scenario, &scenario_names,
+                    &real_var_names, &implicits_by_scenario[cmi.scenario]
+                };
+            },
+            [&](const int& v)
+            {
+                return ExtendedShannonVar{
+                    CmiTriplet{}, &var_names_by_scenario, &scenario_names,
+                    &real_var_names, nullptr, v
+                };
+            }
+        }, t);
+    }
 
     if (orig_proof.objective.get(0) != 0.0)
         proof.objective.inc(0, orig_proof.objective.get(0));
@@ -2204,6 +2333,9 @@ ShannonProofSimplifier::operator SimplifiedShannonProof()
 
 std::ostream& operator<<(std::ostream& out, ExtendedShannonVar t)
 {
+    if (t.real_var >= 0)
+        return out << (*t.real_var_names)[t.real_var];
+
     if (t[0] > t[1])
         std::swap(t[0], t[1]);
 
@@ -2247,7 +2379,7 @@ bool ExtendedShannonRule::print(std::ostream& out, const ExtendedShannonVar* var
             continue;
         }
         print_coeff(out, scale * v, first);
-        out << ExtendedShannonVar {cmi, var_names_by_scenario, scenario_names, implicits};
+        out << ExtendedShannonVar{cmi, var_names_by_scenario, scenario_names, nullptr, implicits};
         first = false;
     }
 
@@ -2274,7 +2406,7 @@ OrderedSimplifiedShannonProof SimplifiedShannonProof::order() const
     CoinOsiProblem coin(si, true);
 
     std::vector<int> constraint_map;
-    MatrixT<CmiTriplet> used_constraints;
+    MatrixT<Symbol> used_constraints;
 
     for (auto [i, v] : dual_solution.entries)
     {
@@ -2292,13 +2424,18 @@ OrderedSimplifiedShannonProof SimplifiedShannonProof::order() const
             used_constraints.back() = std::visit(overload {
                 [&](const NonNegativityRule& r)
                 {
-                    SparseVectorT<CmiTriplet> c;
+                    SparseVectorT<Symbol> c;
                     c.inc(variables[r.v], 1.0);
                     return c;
                 },
                 [&](const ExtendedShannonRule& r)
                 {
-                    return r.get_constraint((*implicits_by_scenario)[r.scenario]);
+                    SparseVectorT<CmiTriplet> c = r.get_constraint((*implicits_by_scenario)[r.scenario]);
+                    SparseVectorT<Symbol> constraint;
+                    constraint.is_equality = c.is_equality;
+                    for (const auto& [cmi, v] : c.entries)
+                        constraint.entries[cmi] = v;
+                    return constraint;
                 }
             }, regular_constraints[i - 1]);
 
@@ -2321,12 +2458,12 @@ OrderedSimplifiedShannonProof SimplifiedShannonProof::order() const
     // How big can each partial sum get.
     std::vector<double> min_partial_sums, max_partial_sums;
 
-    std::map<CmiTriplet, int> used_triplets;
+    std::map<Symbol, int> used_terms;
     for (const auto& constraint : used_constraints)
     {
         for (const auto& [t, val] : constraint.entries)
         {
-            auto [it, inserted] = used_triplets.insert({t, used_triplets.size()});
+            auto [it, inserted] = used_terms.insert({t, used_terms.size()});
 
             double min_v = std::min(val, 0.0);
             double max_v = std::max(val, 0.0);
@@ -2346,7 +2483,7 @@ OrderedSimplifiedShannonProof SimplifiedShannonProof::order() const
     }
 
     const int steps = used_constraints.size();
-    const int terms = used_triplets.size();
+    const int terms = used_terms.size();
 
     std::vector<int> integer_vars;
     std::vector<int> indices;
@@ -2401,7 +2538,7 @@ OrderedSimplifiedShannonProof SimplifiedShannonProof::order() const
             indices.clear(); values.clear();
             for (const auto& [t, v] : used_constraints[j].entries)
             {
-                indices.push_back(partial_sum_correctness_start + i * terms + used_triplets.at(t));
+                indices.push_back(partial_sum_correctness_start + i * terms + used_terms.at(t));
                 values.push_back(v);
             }
 
@@ -2410,9 +2547,9 @@ OrderedSimplifiedShannonProof SimplifiedShannonProof::order() const
         }
     }
 
-    // TODO: Maybe better to all variations in the scale at which each rule is used, as long as only
-    // 1 rule is used at a time. That way this optimization could simplify cases where two different
-    // proofs got mixed together.
+    // TODO: Maybe better to allow variations in the scale at which each rule is used, as long as
+    // only 1 rule is used at a time. That way this optimization could simplify cases where two
+    // different proofs got mixed together.
 
     // Variables for each step and term (except for the last), for whether the term is present in
     // the partial sum after this step. The objective is to minimize these variables.

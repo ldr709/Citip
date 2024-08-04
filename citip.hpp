@@ -407,6 +407,7 @@ namespace std
 struct ShannonVar {
     const std::vector<std::vector<std::string>>& var_names_by_scenario;
     const std::vector<std::string>& scenario_names;
+    const std::vector<std::string>& real_var_names;
     const std::map<int, int>& column_map;
     const std::vector<ImplicitRules>& implicits_by_scenario;
 
@@ -432,8 +433,15 @@ struct ShannonRule : public CmiTriplet {
 struct ExtendedShannonVar : public CmiTriplet {
     const std::vector<std::vector<std::string>>* var_names_by_scenario = nullptr;
     const std::vector<std::string>* scenario_names = nullptr;
+    const std::vector<std::string>* real_var_names = nullptr;
     const ImplicitRules* implicits = nullptr;
 
+    // For if this is a real variable instead of a CMI of random variables.
+    int real_var = -1;
+
+    operator std::variant<CmiTriplet, int>() const;
+
+    bool is_zero() const;
     friend std::ostream& operator<<(std::ostream&, ExtendedShannonVar);
 };
 
@@ -486,6 +494,8 @@ struct SimplifiedShannonProof :
     typedef LinearProof<ExtendedShannonVar, NonNegativityOrOtherRule<ExtendedShannonRule>> Parent;
     using Parent::Parent;
 
+    typedef std::variant<CmiTriplet, int> Symbol;
+
     OrderedSimplifiedShannonProof order() const;
 
     const std::vector<ImplicitRules>* implicits_by_scenario = nullptr;
@@ -496,12 +506,14 @@ struct ShannonTypeProof : public LinearProof<ShannonVar, ShannonRule>
     typedef LinearProof<ShannonVar, ShannonRule> Parent;
     using Parent::Parent;
 
+    typedef SimplifiedShannonProof::Symbol Symbol;
+
     SimplifiedShannonProof simplify(int depth) const;
 
     // Save these in case simplify() is run.
-    MatrixT<CmiTriplet> cmi_constraints;
-    MatrixT<CmiTriplet> cmi_constraints_redundant;
-    SparseVectorT<CmiTriplet> cmi_objective;
+    MatrixT<Symbol> cmi_constraints;
+    MatrixT<Symbol> cmi_constraints_redundant;
+    SparseVectorT<Symbol> cmi_objective;
 };
 
 struct OrderedSimplifiedShannonProof : public SimplifiedShannonProof
@@ -522,14 +534,17 @@ class ShannonTypeProblem
     : public LinearProblem
 {
 public:
+    typedef ShannonTypeProof::Symbol Symbol;
+
     ShannonTypeProblem(std::vector<std::vector<std::string>> var_names_by_scenario_,
                        std::vector<std::string> scenario_names_,
+                       std::vector<std::string> real_var_names_,
                        std::vector<ImplicitRules> implicits_by_scenario,
-                       std::vector<SparseVectorT<CmiTriplet>> cmi_constraints_redundant_);
+                       MatrixT<Symbol> cmi_constraints_redundant_);
     ShannonTypeProblem(const ParserOutput&);
 
-    void add(const SparseVector&, SparseVectorT<CmiTriplet>);
-    ShannonTypeProof prove(const SparseVector& I, SparseVectorT<CmiTriplet> cmi_I);
+    void add(const SparseVector&, SparseVectorT<Symbol>);
+    ShannonTypeProof prove(const SparseVector& I, SparseVectorT<Symbol> cmi_I);
 
 protected:
     void add_columns();
@@ -539,8 +554,8 @@ protected:
     using LinearProblem::add;
     void add_elemental_inequalities();
 
-    MatrixT<CmiTriplet> cmi_constraints;
-    MatrixT<CmiTriplet> cmi_constraints_redundant;
+    MatrixT<Symbol> cmi_constraints;
+    MatrixT<Symbol> cmi_constraints_redundant;
     std::vector<ImplicitRules> implicits_by_scenario;
 
     std::map<int, int> column_map;
@@ -548,19 +563,29 @@ protected:
 
     const std::vector<std::string> scenario_names;
     const std::vector<std::vector<std::string>> var_names_by_scenario;
+
+    // Real valued variables used in the linear inequalities, not the random variables above.
+    const std::vector<std::string> real_var_names;
+
     std::vector<CmiTriplet> row_to_cmi;
 };
 
 
 class ParserOutput : public ParserCallback
 {
+    typedef ShannonTypeProof::Symbol Symbol;
+
     int get_var_index(int scenario, const std::string&);
+    int get_real_var_index(const std::string&);
     int get_set_index(int scenario, const ast::VarList&);     // as in 'set of variables'
-    void add_term(SparseVector&, SparseVectorT<CmiTriplet>&, const ast::Term&,
+    void add_term(SparseVector&, SparseVectorT<Symbol>&, const ast::Term&,
                   int scenario_wildcard, double scale);
 
     std::map<std::tuple<int, std::string>, int> vars_by_scenario;
     std::map<std::string, int> scenarios;
+
+    // Real valued variables used in the linear inequalities, not the random variables above.
+    std::map<std::string, int> real_vars;
 
     std::tuple<int, int> scenario_range(const std::string& scenario) const;
     const std::vector<std::string>& scenario_list(const ast::VarList& scenarios) const;
@@ -577,12 +602,13 @@ class ParserOutput : public ParserCallback
                          ast::FunctionOf, ast::IndistinguishableScenarios> statement;
     std::vector<statement> statement_list;
 
-    void add_relation(SparseVector, SparseVectorT<CmiTriplet>, bool is_inquiry);
+    void add_relation(SparseVector, SparseVectorT<Symbol>, bool is_inquiry);
 
     void add_scenario(const std::string&);
     void add_scenarios(const ast::VarList&);
-    void add_symbols(int scenario, const ast::VarList&);
-    void add_cmi(SparseVector& v, SparseVectorT<CmiTriplet>& cmi_v,
+    void add_vars(int scenario, const ast::VarList&);
+    void add_real_var(const std::string&);
+    void add_cmi(SparseVector& v, SparseVectorT<Symbol>& cmi_v,
                  CmiTriplet t, double coeff) const;
 
     void process_statement(const statement& s);
@@ -596,16 +622,17 @@ public:
     // consider this read-only
     std::vector<std::string> scenario_names;
     std::vector<std::vector<std::string>> var_names_by_scenario;
+    std::vector<std::string> real_var_names;
 
     Matrix inquiries;
     Matrix constraints;
     std::vector<ImplicitRules> implicits_by_scenario;
 
-    MatrixT<CmiTriplet> cmi_constraints;
-    MatrixT<CmiTriplet> cmi_inquiries;
+    MatrixT<Symbol> cmi_constraints;
+    MatrixT<Symbol> cmi_inquiries;
 
     // Redundant constraints that can be used for proof simplification.
-    MatrixT<CmiTriplet> cmi_constraints_redundant;
+    MatrixT<Symbol> cmi_constraints_redundant;
 
     void process();
 
