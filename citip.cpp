@@ -365,7 +365,8 @@ void ParserOutput::add_term(SparseVector& v, SparseVectorT<Symbol>& cmi_v,
     const auto& q = std::get<ast::EntropyQuantity>(t.quantity);
     int num_parts = q.parts.lists.size();
 
-    const int scenario = q.parts.scenario == "" ? scenario_wildcard : scenarios.at(q.parts.scenario);
+    const int scenario = (q.parts.scenario == "" && scenario_wildcard >= 0)
+                         ? scenario_wildcard : scenarios.at(q.parts.scenario);
 
     const auto& implicits = implicits_by_scenario[scenario];
 
@@ -828,6 +829,9 @@ void ParserOutput::process_mutual_independence(const ast::MutualIndependence& mi
 {
     bool is_inquiry = inquiries.empty();
 
+    bool implicit = mi.implicit();
+    bool approx = implicit ? false : !mi.bound_or_implicit.value().empty();
+
     for (const auto& sc: scenario_list(mi.scenarios))
     {
         int scenario = scenarios.at(sc);
@@ -863,7 +867,7 @@ void ParserOutput::process_mutual_independence(const ast::MutualIndependence& mi
             int all = 0;
             SparseVector v;
             SparseVectorT<Symbol> cmi_v;
-            cmi_v.is_equality = v.is_equality = true;
+            cmi_v.is_equality = v.is_equality = !approx;
             for (auto subset : subsets) {
                 // Check if subset contains the sentinal element saying that this subset is left out
                 // of the partition.
@@ -872,19 +876,23 @@ void ParserOutput::process_mutual_independence(const ast::MutualIndependence& mi
 
                 int idx = convert_set(subset);
                 all |= idx;
-                add_cmi(v, cmi_v, CmiTriplet(implicits, idx,idx,0, scenario), 1);
+                add_cmi(v, cmi_v, CmiTriplet(implicits, idx,idx,0, scenario), -1);
                 //std::cout << ExtendedShannonVar {CmiTriplet(implicits, idx,idx,0, scenario), &var_names, &scenario_names, &implicits} << " + ";
             }
-            add_cmi(v, cmi_v, CmiTriplet(implicits, all,all,0, scenario), -1);
+            add_cmi(v, cmi_v, CmiTriplet(implicits, all,all,0, scenario), 1);
             //std::cout << "0 = " << ExtendedShannonVar {CmiTriplet(implicits, all,all,0, scenario), &var_names, &scenario_names, &implicits} << '\n';
+            if (approx)
+                for (auto&& term : mi.bound_or_implicit.value())
+                    add_term(v, cmi_v, term, scenario, 1);
             add_relation(move(v), move(cmi_v), is_inquiry);
         };
 
-        // Skip the redundant constraints entirely and just do the full subset if there's way too
-        // many.
-        if (set_indices.size() > 13)
+        // Skip the redundant constraints entirely and just do the full subset if there's way too many.
+        // Also, if the independence is approximate only include the one rule, otherwise it seems
+        // less clear how the approximation bound is defined. (Though it still implies the others.)
+        if (set_indices.size() > 13 || approx)
         {
-            partition_constraint(*util::partitions(set_indices.size()).begin());
+            partition_constraint(*util::partitions(set_indices.size() + 1).begin());
             continue;
         }
 
@@ -910,7 +918,7 @@ void ParserOutput::process_mutual_independence(const ast::MutualIndependence& mi
         // CMI(a ; b | z) = 0 among the independent variables, for b and z both disjoint from a.
 
         // Already handled for implicit rules, so skip in that case.
-        if (mi.implicit())
+        if (implicit)
             continue;
 
         // Avoid adding duplicate rules.
@@ -962,11 +970,15 @@ void ParserOutput::process_markov_chain(const ast::MarkovChain& mc)
             a |= get_set_index(scenario, mc.lists[i+0]);
             b = get_set_index(scenario, mc.lists[i+1]);
             c = get_set_index(scenario, mc.lists[i+2]);
-            // 0 = I(a:c|b) = H(a|b) + H(c|b) - H(a,c|b)
+            // 0 >= I(a:c|b) = H(a|b) + H(c|b) - H(a,c|b)
+
             SparseVector v;
             SparseVectorT<Symbol> cmi_v;
-            cmi_v.is_equality = v.is_equality = true;
-            add_cmi(v, cmi_v, CmiTriplet(implicits, a,c,b, scenario), 1);
+            cmi_v.is_equality = v.is_equality = false;
+
+            add_cmi(v, cmi_v, CmiTriplet(implicits, a,c,b, scenario), -1);
+            for (auto&& term : mc.bound)
+                add_term(v, cmi_v, term, scenario, 1);
             add_relation(move(v), move(cmi_v), is_inquiry);
         }
     }
@@ -991,15 +1003,41 @@ void ParserOutput::process_function_of(const ast::FunctionOf& fo)
         // 0 = H(func|of) = H(func,of) - H(of)
         SparseVector v;
         SparseVectorT<Symbol> cmi_v;
-        cmi_v.is_equality = v.is_equality = true;
-        add_cmi(v, cmi_v, CmiTriplet(implicits, func,func,of,scenario), 1);
+        cmi_v.is_equality = v.is_equality = false;
+        add_cmi(v, cmi_v, CmiTriplet(implicits, func,func,of,scenario), -1);
+        for (auto&& term : fo.bound_or_implicit.value())
+            add_term(v, cmi_v, term, scenario, 1);
         add_relation(move(v), move(cmi_v), is_inquiry);
     }
 }
 
 void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
 {
+    if (is.indist_scenarios.empty())
+        return;
+
     bool is_inquiry = inquiries.empty();
+    size_t view_size = is.indist_scenarios.front().view.size();
+    if (!view_size)
+        return;
+
+    auto bound = is.bound;
+    bool approx = !bound.empty();
+    if (bound.size() == 1)
+        bound.resize(view_size + 1);
+    if (approx && bound.size() != view_size + 1)
+        throw std::runtime_error("indist expects view_size + 1 (or 1) approximation bounds.");
+
+    auto add_approx_bound = [&](SparseVector& v, SparseVectorT<Symbol>& cmi_v,
+                                int a, bool is_mutual, double scale)
+    {
+        for (auto&& term : bound[0])
+            add_term(v, cmi_v, term, -1, scale * (1 + is_mutual));
+        for (int i = 0; i < view_size; ++i)
+            if ((a >> i) & 1)
+                for (auto&& term : bound[i + 1])
+                    add_term(v, cmi_v, term, -1, scale);
+    };
 
     // Require that all entropies defined by the view match between the scenarios.
     auto indist_views = [&](int scenario0, const ast::VarList& view0,
@@ -1009,8 +1047,8 @@ void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
         const auto& implicits0 = implicits_by_scenario[scenario0];
         const auto& implicits1 = implicits_by_scenario[scenario1];
 
-        assert(view0.size() == view1.size());
-        assert(view0.size() > 0);
+        if (view0.size() != view_size || view1.size() != view_size)
+            throw std::runtime_error("Supposed indistinguishable views have differing sizes.");
 
         int full_set = (1 << view0.size()) - 1;
 
@@ -1024,8 +1062,8 @@ void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
         };
 
         // Require that all entropies defined by the view match between the scenarios. This is
-        // skipped when all_redundant (i.e., when i > 1), as those are implied by the two equalities
-        // going through i = 1.
+        // skipped when all_redundant (i.e., when i > 1 && !approx), as those are implied by the two
+        // equalities going through i = 1.
         if (!all_redundant)
             for (int a : util::skip_n(util::disjoint_subsets(0, full_set), 1))
             {
@@ -1037,26 +1075,32 @@ void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
                 if (cmi0.is_zero() && cmi1.is_zero())
                     continue;
 
-                SparseVector v;
-                SparseVectorT<Symbol> cmi_v;
-                cmi_v.is_equality = v.is_equality = true;
-                add_cmi(v, cmi_v, cmi0, 1.0);
-                add_cmi(v, cmi_v, cmi1, -1.0);
-                add_relation(move(v), move(cmi_v), is_inquiry);
+                for (int neg = 0; neg <= approx; ++neg)
+                {
+                    SparseVector v;
+                    SparseVectorT<Symbol> cmi_v;
+                    cmi_v.is_equality = v.is_equality = !approx;
+                    add_cmi(v, cmi_v, cmi0, 1 - 2*neg);
+                    add_cmi(v, cmi_v, cmi1, 2*neg - 1);
+                    if (approx)
+                        add_approx_bound(v, cmi_v, a, false, 1.0);
+                    add_relation(move(v), move(cmi_v), is_inquiry);
+                }
             }
 
-        // Avoid adding redundant rules.
+        // Avoid adding duplicate rules.
         std::set<std::array<int, 6>> added_rules;
 
         // Skip z > 0 when this would make the set of constraints way too big.
-        int max_z = (view0.size() > 6 ? 0 : full_set);
+        int max_z = (view0.size() > 6 && !approx ? 0 : full_set);
 
         // Skip the redundant constraints entirely if there's way too many.
-        if (view0.size() > 14)
+        if (view0.size() > 14 && !approx)
             return;
 
-        // Redundantly include all pairs of CMIs, rather than just the base entropies, so
-        // that the simplifier can pick the most useful equalities.
+        // Redundantly include all pairs of CMIs, rather than just the base entropies, so that the
+        // simplifier can pick the most useful equalities. Again, these are not so redundant when
+        // there's only an approximate bound on the entropy difference.
         for (int z = 0; z <= max_z; ++z)
         {
             for (int b : util::skip_n(util::disjoint_subsets(z, full_set), 1))
@@ -1065,7 +1109,9 @@ void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
                 {
                     if (a > b)
                         break;
-                    if (a != b && (a | b) == b)
+                    if (a == b && z == 0) // Already handled above.
+                        continue;
+                    if (a != b && ((a | b) == b || (a | b) == a))
                         continue;
 
                     CmiTriplet cmi0(implicits0,
@@ -1082,17 +1128,42 @@ void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
                     if (!added_rules.insert({cmi0[0], cmi0[1], cmi0[2], cmi1[0], cmi1[1], cmi1[2]}).second)
                         continue;
 
-                    SparseVectorT<Symbol> cmi_v;
-                    cmi_v.is_equality = true;
-                    cmi_v.inc(cmi0, 1.0);
-                    cmi_v.inc(cmi1, -1.0);
-                    cmi_constraints_redundant.push_back(move(cmi_v));
+                    if (!approx)
+                    {
+                        SparseVectorT<Symbol> cmi_v;
+                        cmi_v.is_equality = true;
+                        cmi_v.inc(cmi0, 1.0);
+                        cmi_v.inc(cmi1, -1.0);
+                        cmi_constraints_redundant.push_back(move(cmi_v));
+                    }
+                    else
+                    {
+                        for (int use_b_size = 0; use_b_size <= (a != b); ++use_b_size)
+                        {
+                            int set_for_size = use_b_size ? b : a;
+                            for (int neg = 0; neg <= approx; ++neg)
+                            {
+                                SparseVector v;
+                                SparseVectorT<Symbol> cmi_v;
+                                cmi_v.is_equality = v.is_equality = false;
+                                add_cmi(v, cmi_v, cmi0, 1 - 2*neg);
+                                add_cmi(v, cmi_v, cmi1, 2*neg - 1);
+                                add_approx_bound(v, cmi_v, set_for_size, a != b, 1.0);
+                                add_relation(move(v), move(cmi_v), is_inquiry);
+
+                                //std::cout << ExtendedShannonVar {cmi0, &var_names_by_scenario, &scenario_names, nullptr, &implicits_by_scenario[scenario0]} << ", ";
+                                //std::cout << ExtendedShannonVar {cmi1, &var_names_by_scenario, &scenario_names, nullptr, &implicits_by_scenario[scenario1]} << ", " << set_for_size << '\n';
+                            }
+                        }
+                    }
                 }
             }
         }
     };
 
     // Includes redundant pairs of scenarios so that the simplifier can pick the most useful pairs.
+    // These are not so redundant when there's an approximate bound, as different ways through the
+    // constraints add in different extra approximation values.
     int i = 0;
     for (const auto& group0 : is.indist_scenarios)
     {
@@ -1113,7 +1184,7 @@ void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
                         continue;
                     int scenario1 = scenarios.at(scenario_name1);
 
-                    indist_views(scenario0, group0.view, scenario1, group1.view, i > 1);
+                    indist_views(scenario0, group0.view, scenario1, group1.view, i > 1 && !approx);
                 }
             }
         }
