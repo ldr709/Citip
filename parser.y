@@ -39,27 +39,32 @@
 %token <double>         NUM
 %token <int>            SIGN
                         REL
+%token <int>            FUNCTION_OF
+%token <int>            APPROX
 %token <int>            INDIST
 %token <int>            IMPLICIT
 
-%type <ast::Relation>                   inform_inequ
-%type <ast::MutualIndependence>         mutual_indep
-%type <std::vector<ast::VarList>>       mutual_indep_list
-%type <ast::MarkovChain>                markov_chain
-%type <std::vector<ast::VarList>>       markov_chain_list
-%type <ast::FunctionOf>                 determ_depen
-%type <bool>                            maybe_implicit
-%type <ast::Expression>                 inform_expr
-%type <ast::Term>                       inform_term
-%type <ast::Quantity>                   inform_quant
-%type <ast::EntropyQuantity>            entropy
-%type <ast::EntropyQuantity>            mutual_inf
-%type <ast::VarList>                    name_list
-%type <std::vector<ast::VarList>>       mut_inf_core;
-%type <std::string>                     name;
-%type <ast::IndistinguishableScenarios> indist;
-%type <ast::IndistinguishableScenarios> indist_list;
-%type <ast::IndistinguishableScenario>  indist_item;
+%type <ast::Relation>                       inequality
+%type <ast::MutualIndependence>             mutual_indep
+%type <std::vector<ast::VarList>>           mutual_indep_list
+%type <ast::MarkovChain>                    markov_chain
+%type <std::vector<ast::VarList>>           markov_chain_list
+%type <ast::FunctionOf>                     determ_depen
+%type <std::vector<ast::Expression>>        expr_list
+%type <ast::Expression>                     expr
+%type <ast::Term>                           term
+%type <ast::Quantity>                       quant
+%type <ast::EntropyQuantity>                entropy
+%type <ast::EntropyQuantity>                mutual_inf
+%type <ast::VarList>                        name_list
+%type <std::vector<ast::VarList>>           mut_inf_core;
+%type <std::string>                         name;
+%type <ast::IndistinguishableScenarios>     indist;
+%type <ast::IndistinguishableScenariosList> indist_list;
+%type <ast::IndistinguishableScenario>      indist_item;
+%type <ast::BoundOrImplicit>                bound_or_implicit;
+%type <ast::Expression>                     maybe_bound;
+%type <std::vector<ast::Expression>>        indist_bound;
 
 %start statement
 
@@ -111,7 +116,7 @@
     /* deliver output */
 
 statement    : %empty           { /* allow empty (or pure comment) lines */ }
-             | inform_inequ     { cb->relation(move($1)); }
+             | inequality       { cb->relation(move($1)); }
              | mutual_indep     { cb->mutual_independence(move($1)); }
              | markov_chain     { cb->markov_chain(move($1)); }
              | determ_depen     { cb->function_of(move($1)); }
@@ -120,51 +125,55 @@ statement    : %empty           { /* allow empty (or pure comment) lines */ }
 
     /* statements */
 
-inform_inequ      : inform_expr REL inform_expr                               { $$ = {$1, $2, $3}; }
+inequality        : expr REL expr                                                { $$ = {$1, $2, $3}; }
                   ;
 
-markov_chain      : markov_chain_list                                         { $$ = {{}, $1}; }
-                  | name_list ':' markov_chain_list                           { $$ = {$1, $3}; }
+markov_chain      : markov_chain_list maybe_bound                                { $$ = {{}, $1, $2}; }
+                  | name_list ':' markov_chain_list maybe_bound                  { $$ = {$1, $3, $4}; }
                   ;
 
-markov_chain_list : markov_chain_list '/' name_list                           { $$ = enlist($1, $3); }
-                  | name_list '/' name_list '/' name_list                     { $$ = {$1, $3, $5}; }
+markov_chain_list : markov_chain_list '/' name_list                              { $$ = enlist($1, $3); }
+                  | name_list '/' name_list '/' name_list                        { $$ = {$1, $3, $5}; }
                   ;
 
-mutual_indep      : mutual_indep_list maybe_implicit                          { $$ = {{}, $1, $2}; }
-                  | name_list ':' mutual_indep_list maybe_implicit            { $$ = {$1, $3, $4}; }
+mutual_indep      : mutual_indep_list bound_or_implicit                          { $$ = {{}, $1, $2}; }
+                  | name_list ':' mutual_indep_list bound_or_implicit            { $$ = {$1, $3, $4}; }
                   ;
 
-mutual_indep_list : mutual_indep_list '.' name_list                           { $$ = enlist($1, $3); }
-                  |         name_list '.' name_list                           { $$ = {$1, $3}; }
+mutual_indep_list : mutual_indep_list '.' name_list                              { $$ = enlist($1, $3); }
+                  |         name_list '.' name_list                              { $$ = {$1, $3}; }
                   ;
 
-determ_depen      : name_list '<' '-' name_list maybe_implicit                { $$ = {{}, $1, $4, $5}; }
-                  | name_list ':' name_list '<' '-' name_list maybe_implicit  { $$ = {$1, $3, $6, $7}; }
+determ_depen      : name_list FUNCTION_OF name_list bound_or_implicit            { $$ = {{}, $1, $3, $4}; }
+                  | name_list ':' name_list '<' '-' name_list bound_or_implicit  { $$ = {$1, $3, $6, $7}; }
                   ;
 
-indist            : INDIST indist_list                                        { $$ = $2; }
-                  | INDIST name_list                                          { $$ = {{{}, $2}}; }
-                  | INDIST ':' name_list                                      { $$ = {{{}, $3}}; }
+indist            : INDIST indist_list indist_bound                              { $$ = {$2, $3}; }
+                  | INDIST name_list indist_bound                                { $$ = {{{{}, $2}}, $3}; }
+                  | INDIST ':' name_list indist_bound                            { $$ = {{{{}, $3}}, $4}; }
                   ;
 
-indist_list       : indist_list ';' indist_item                               { $$ = enlist($1, $3); }
-                  | indist_item                                               { $$ = {$1}; }
+indist_list       : indist_list ';' indist_item                                  { $$ = enlist($1, $3); }
+                  | indist_item                                                  { $$ = {$1}; }
                   ;
 
-indist_item       : name_list ':' name_list                                   { $$ = {$1, $3}; }
+indist_item       : name_list ':' name_list                                      { $$ = {$1, $3}; }
                   ;
 
     /* building blocks */
 
-inform_expr    : inform_expr SIGN inform_term     { $$ = enlist($1, $3.flip_sign($2)); }
-               |             SIGN inform_term     { $$ = {$2.flip_sign($1)}; }
-               |                  inform_term     { $$ = {$1}; }
+expr_list      : expr_list ',' expr               { $$ = enlist($1, $3); }
+               | expr                             { $$ = {$1}; }
                ;
 
-inform_term    : INT inform_quant                 { $$ = {std::stod($1), $2}; }
-               | NUM inform_quant                 { $$ = {$1, $2}; }
-               |     inform_quant                 { $$ = { 1, $1}; }
+expr           : expr SIGN term                   { $$ = enlist($1, $3.flip_sign($2)); }
+               |      SIGN term                   { $$ = {$2.flip_sign($1)}; }
+               |           term                   { $$ = {$1}; }
+               ;
+
+term           : INT quant                        { $$ = {std::stod($1), $2}; }
+               | NUM quant                        { $$ = {$1, $2}; }
+               |     quant                        { $$ = { 1, $1}; }
                | INT NAME                         { $$ = {std::stod($1), ast::VariableQuantity{$2}}; }
                | NUM NAME                         { $$ = {$1, ast::VariableQuantity{$2}}; }
                |     NAME                         { $$ = { 1, ast::VariableQuantity{$1}}; }
@@ -172,7 +181,7 @@ inform_term    : INT inform_quant                 { $$ = {std::stod($1), $2}; }
                | NUM                              { $$ = {$1, ast::ConstantQuantity{}}; }
                ;
 
-inform_quant   : entropy                          { $$ = $1; }
+quant          : entropy                          { $$ = $1; }
                | mutual_inf                       { $$ = $1; }
                ;
 
@@ -184,7 +193,7 @@ mutual_inf     : MUTUAL_INFORMATION '(' mut_inf_core              ')'  { $$ = {{
                | MUTUAL_INFORMATION '(' mut_inf_core '|' name_list ')'  { $$ = {{$1, $3}, $5}; }
                ;
 
-mut_inf_core   :  mut_inf_core ';' name_list     { $$ = enlist($1, $3); }
+mut_inf_core   :  mut_inf_core ';' name_list      { $$ = enlist($1, $3); }
                |      name_list ';' name_list     { $$ = {$1, $3}; }
                ;
 
@@ -196,8 +205,16 @@ name           : NAME                             { $$ = $1; }
                | INT                              { $$ = $1; }
                ;
 
-maybe_implicit : IMPLICIT                         { $$ = true; }
-               | %empty                           { $$ = false; }
+bound_or_implicit : IMPLICIT                      { $$ = {}; }
+                  | maybe_bound                   { $$ = {$1}; }
+                  ;
+
+maybe_bound    : APPROX expr                      { $$ = $2; }
+               | %empty                           { $$ = {}; }
+               ;
+
+indist_bound   : APPROX expr_list                 { $$ = $2; }
+               | %empty                           { $$ = {}; }
                ;
 
 %%

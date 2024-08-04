@@ -497,32 +497,46 @@ void ParserOutput::indist(ast::IndistinguishableScenarios is)
 void ParserOutput::process()
 {
     // Add the scenarios
+
+    auto add_scenarios_from_expr =
+        [&](const ast::Expression& e)
+        {
+            for (const auto& term : e)
+                if (const auto* q = std::get_if<ast::EntropyQuantity>(&term.quantity))
+                    if (q->parts.scenario != "")
+                        add_scenario(q->parts.scenario);
+        };
+
     for (const auto& s : statement_list)
         std::visit(overload {
             [&](const ast::Relation& r)
             {
                 for (const ast::Expression& side : {r.left, r.right})
-                    for (const auto& term : side)
-                        if (const auto* q = std::get_if<ast::EntropyQuantity>(&term.quantity))
-                            if (q->parts.scenario != "")
-                                add_scenario(q->parts.scenario);
+                    add_scenarios_from_expr(side);
             },
             [&](const ast::MarkovChain& mc)
             {
                 add_scenarios(mc.scenarios);
+                add_scenarios_from_expr(mc.bound);
             },
             [&](const ast::MutualIndependence& mi)
             {
                 add_scenarios(mi.scenarios);
+                if (mi.bound_or_implicit)
+                    add_scenarios_from_expr(mi.bound_or_implicit.value());
             },
             [&](const ast::FunctionOf& f)
             {
                 add_scenarios(f.scenarios);
+                if (f.bound_or_implicit)
+                    add_scenarios_from_expr(f.bound_or_implicit.value());
             },
             [&](const ast::IndistinguishableScenarios& is)
             {
-                for (const auto& group: is)
+                for (const auto& group: is.indist_scenarios)
                     add_scenarios(group.scenarios);
+                for (const auto& expr: is.bound)
+                    add_scenarios_from_expr(expr);
             }
         }, s);
 
@@ -533,33 +547,38 @@ void ParserOutput::process()
     var_names_by_scenario.resize(scenario_names.size());
 
     // Add the variables.
+
+    auto add_vars_from_expr =
+        [&](const ast::Expression& e)
+        {
+            for (const auto& term : e)
+            {
+                std::visit(overload {
+                    [&](const ast::EntropyQuantity& q)
+                    {
+                        for (auto [scenario, last] = scenario_range(q.parts.scenario);
+                             scenario < last; ++scenario)
+                        {
+                            for (const auto& vl : q.parts.lists)
+                                add_vars(scenario, vl);
+                            add_vars(scenario, q.cond);
+                        }
+                    },
+                    [&](const ast::VariableQuantity& var)
+                    {
+                        add_real_var(var.name);
+                    },
+                    [&](const ast::ConstantQuantity& mi) {}
+                }, term.quantity);
+            }
+        };
+
     for (const auto& s : statement_list)
         std::visit(overload {
             [&](const ast::Relation& r)
             {
                 for (const ast::Expression& side : {r.left, r.right})
-                {
-                    for (const auto& term : side)
-                    {
-                        std::visit(overload {
-                            [&](const ast::EntropyQuantity& q)
-                            {
-                                for (auto [scenario, last] = scenario_range(q.parts.scenario);
-                                     scenario < last; ++scenario)
-                                {
-                                    for (const auto& vl : q.parts.lists)
-                                        add_vars(scenario, vl);
-                                    add_vars(scenario, q.cond);
-                                }
-                            },
-                            [&](const ast::VariableQuantity& var)
-                            {
-                                add_real_var(var.name);
-                            },
-                            [&](const ast::ConstantQuantity& mi) {}
-                        }, term.quantity);
-                    }
-                }
+                    add_vars_from_expr(side);
             },
             [&](const ast::MarkovChain& mc)
             {
@@ -568,6 +587,7 @@ void ParserOutput::process()
                     int scenario = scenarios.at(sc);
                     for (const auto& vl : mc.lists)
                         add_vars(scenario, vl);
+                    add_vars_from_expr(mc.bound);
                 }
             },
             [&](const ast::MutualIndependence& mi)
@@ -577,6 +597,8 @@ void ParserOutput::process()
                     int scenario = scenarios.at(sc);
                     for (const auto& vl : mi.lists)
                         add_vars(scenario, vl);
+                    if (mi.bound_or_implicit)
+                        add_vars_from_expr(mi.bound_or_implicit.value());
                 }
             },
             [&](const ast::FunctionOf& f)
@@ -586,13 +608,17 @@ void ParserOutput::process()
                     int scenario = scenarios.at(sc);
                     add_vars(scenario, f.function);
                     add_vars(scenario, f.of);
+                    if (f.bound_or_implicit)
+                        add_vars_from_expr(f.bound_or_implicit.value());
                 }
             },
             [&](const ast::IndistinguishableScenarios& is)
             {
-                for (const auto& group: is)
+                for (const auto& group: is.indist_scenarios)
                     for (const auto& sc: scenario_list(group.scenarios))
                         add_vars(scenarios.at(sc), group.view);
+                for (const auto& expr: is.bound)
+                    add_vars_from_expr(expr);
             }
         }, s);
 
@@ -602,7 +628,7 @@ void ParserOutput::process()
         if (s.index() != FUNCTION_OF)
             continue;
         const auto& fo = std::get<FUNCTION_OF>(s);
-        if (!fo.implicit)
+        if (!fo.implicit())
             continue;
 
         for (const auto& sc: scenario_list(fo.scenarios))
@@ -639,7 +665,7 @@ void ParserOutput::process()
         if (s.index() != MUTUAL_INDEPENDENCE)
             continue;
         const auto& mi = std::get<MUTUAL_INDEPENDENCE>(s);
-        if (!mi.implicit)
+        if (!mi.implicit())
             continue;
 
         for (const auto& sc: scenario_list(mi.scenarios))
@@ -884,7 +910,7 @@ void ParserOutput::process_mutual_independence(const ast::MutualIndependence& mi
         // CMI(a ; b | z) = 0 among the independent variables, for b and z both disjoint from a.
 
         // Already handled for implicit rules, so skip in that case.
-        if (mi.implicit)
+        if (mi.implicit())
             continue;
 
         // Avoid adding duplicate rules.
@@ -949,7 +975,7 @@ void ParserOutput::process_markov_chain(const ast::MarkovChain& mc)
 void ParserOutput::process_function_of(const ast::FunctionOf& fo)
 {
     // Already handled.
-    if (fo.implicit)
+    if (fo.implicit())
         return;
 
     bool is_inquiry = inquiries.empty();
@@ -1068,7 +1094,7 @@ void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
 
     // Includes redundant pairs of scenarios so that the simplifier can pick the most useful pairs.
     int i = 0;
-    for (const auto& group0 : is)
+    for (const auto& group0 : is.indist_scenarios)
     {
         const auto& scenario_list0 = group0.scenarios.empty() ? scenario_names : group0.scenarios;
         for (const auto& scenario_name0 : scenario_list0)
@@ -1077,7 +1103,7 @@ void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
             int scenario0 = scenarios.at(scenario_name0);
 
             int j = 0;
-            for (const auto& group1 : is)
+            for (const auto& group1 : is.indist_scenarios)
             {
                 const auto& scenario_list1 = group1.scenarios.empty() ? scenario_names : group1.scenarios;
                 for (const auto& scenario_name1 : scenario_list1)

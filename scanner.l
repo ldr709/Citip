@@ -59,7 +59,8 @@
 
  /* Keywords */
 
-indist\.                               INT_TOKEN(INDIST, 0)
+approx                                 INT_TOKEN(APPROX, 0)
+indist                                 INT_TOKEN(INDIST, 0)
 implicit                               INT_TOKEN(IMPLICIT, 0)
 
  /* Distinguish between entropies and random variables by checking for a following '('. */
@@ -71,12 +72,14 @@ H[[:alnum:]_{}\\]*/\(                      STR_TOKEN_SKIP1(ENTROPY)
 [[:digit:]]+                           STR_TOKEN(INT) /* Delay parsing in case it's a scenario. */
 [[:digit:]]*\.[[:digit:]]+             NUM_TOKEN(NUM)
 
-\+                                     INT_TOKEN(SIGN, ast::SIGN_PLUS)
-\-                                     INT_TOKEN(SIGN, ast::SIGN_MINUS)
+\<-                                    INT_TOKEN(FUNCTION_OF, 0)
 
 ==?                                    INT_TOKEN(REL, ast::REL_EQ)
 \<=                                    INT_TOKEN(REL, ast::REL_LE)
 \>=                                    INT_TOKEN(REL, ast::REL_GE)
+
+\+                                     INT_TOKEN(SIGN, ast::SIGN_PLUS)
+\-                                     INT_TOKEN(SIGN, ast::SIGN_MINUS)
 
 #.*                                    {/* eat comments */}
 [ \t]                                  {/* eat whitespace */}

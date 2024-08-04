@@ -8,6 +8,7 @@
 # include <string>
 # include <variant>
 # include <vector>
+# include <optional>
 
 
 namespace ast
@@ -63,6 +64,8 @@ namespace ast
 
     typedef std::vector<Term> Expression;
 
+    typedef std::optional<ast::Expression> BoundOrImplicit;
+
     struct Relation {
         Expression left;
         int relation;
@@ -73,18 +76,24 @@ namespace ast
     {
         VarList scenarios;
         std::vector<VarList> lists;
-        bool implicit;
+        BoundOrImplicit bound_or_implicit;
+
+        bool implicit() const { return !bound_or_implicit; }
     };
 
     struct MarkovChain {
         VarList scenarios;
         std::vector<VarList> lists;
+
+        Expression bound;
     };
 
     struct FunctionOf {
         VarList scenarios;
         VarList function, of;
-        bool implicit;
+        BoundOrImplicit bound_or_implicit;
+
+        bool implicit() const { return !bound_or_implicit; }
     };
 
     // Specifies that each view (a collection of random variables) must be indistinguishable across
@@ -93,7 +102,13 @@ namespace ast
         std::vector<std::string> scenarios;
         VarList view;
     };
-    typedef std::vector<IndistinguishableScenario> IndistinguishableScenarios;
+
+    typedef std::vector<IndistinguishableScenario> IndistinguishableScenariosList;
+
+    struct IndistinguishableScenarios {
+        IndistinguishableScenariosList indist_scenarios;
+        std::vector<Expression> bound;
+    };
 }
 
 #endif // include-guard
