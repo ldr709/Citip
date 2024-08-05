@@ -15,6 +15,8 @@
 
 # include "parser.hxx"
 
+constexpr double eps = 3e-4;
+
 // https://www.cppstories.com/2019/02/2lines3featuresoverload.html/
 template<class... Ts> struct overload : Ts... { using Ts::operator()...; };
 
@@ -294,7 +296,8 @@ std::ostream& operator<<(std::ostream& out, const LinearProof<Var, Rule>& proof)
     }
 
     for (const auto& [i, dual] : proof.dual_solution.entries)
-        proof.print_step(out, i, dual);
+        if (std::abs(dual) > eps)
+            proof.print_step(out, i, dual);
 
     out << "\n => ";
     proof.print_custom_constraint(out, proof.objective);
@@ -366,8 +369,18 @@ public:
         return prove_impl(I, 0, false);
     }
 
+    // Find the smallest that I can be
+    inline std::optional<double> optimize(const SparseVector& I)
+    {
+        auto proof = prove_impl(I, 0, false, false);
+        if (!proof)
+            return {};
+        return proof.dual_solution.get(0);
+    }
+
 protected:
-    LinearProof<> prove_impl(const SparseVector& I, int num_regular_rules, bool want_proof);
+    LinearProof<> prove_impl(const SparseVector& I, int num_regular_rules,
+                             bool want_proof, bool check_bound = true);
 
     std::unique_ptr<OsiClpSolverInterface> si;
     CoinOsiProblem coin;
@@ -526,10 +539,6 @@ struct OrderedSimplifiedShannonProof : public SimplifiedShannonProof
 class ParserOutput;
 
 // Manage a linear programming problem in the context of random variables.
-// The system has 2**num_vars-1 random variables which correspond to joint
-// entropies of the non-empty subsets of random variables. These quantities
-// are indexed in a canonical way, such that the bit-representation of the
-// index is in one-to-one correspondence with the subset.
 class ShannonTypeProblem
     : public LinearProblem
 {
@@ -539,12 +548,14 @@ public:
     ShannonTypeProblem(std::vector<std::vector<std::string>> var_names_by_scenario_,
                        std::vector<std::string> scenario_names_,
                        std::vector<std::string> real_var_names_,
+                       std::vector<int> opt_coeff_var_names_,
                        std::vector<ImplicitRules> implicits_by_scenario,
                        MatrixT<Symbol> cmi_constraints_redundant_);
     ShannonTypeProblem(const ParserOutput&);
 
+    void add(const SparseVector&);
     void add(const SparseVector&, SparseVectorT<Symbol>);
-    ShannonTypeProof prove(const SparseVector& I, SparseVectorT<Symbol> cmi_I);
+    ShannonTypeProof prove(Matrix I, MatrixT<Symbol> cmi_I);
 
 protected:
     void add_columns();
@@ -560,12 +571,15 @@ protected:
 
     std::map<int, int> column_map;
     std::vector<int> inv_column_map;
+    int one_var;
 
     const std::vector<std::string> scenario_names;
     const std::vector<std::vector<std::string>> var_names_by_scenario;
 
     // Real valued variables used in the linear inequalities, not the random variables above.
     const std::vector<std::string> real_var_names;
+
+    std::vector<int> opt_coeff_var_names;
 
     std::vector<CmiTriplet> row_to_cmi;
 };
@@ -580,12 +594,16 @@ class ParserOutput : public ParserCallback
     int get_set_index(int scenario, const ast::VarList&);     // as in 'set of variables'
     void add_term(SparseVector&, SparseVectorT<Symbol>&, const ast::Term&,
                   int scenario_wildcard, double scale);
+    void add_quantity(SparseVector&, SparseVectorT<Symbol>&, const ast::Quantity&,
+                      int scenario_wildcard, double scale);
 
     std::map<std::tuple<int, std::string>, int> vars_by_scenario;
     std::map<std::string, int> scenarios;
 
     // Real valued variables used in the linear inequalities, not the random variables above.
     std::map<std::string, int> real_vars;
+
+    std::map<int, int> opt_coeff_vars;
 
     std::tuple<int, int> scenario_range(const std::string& scenario) const;
     const std::vector<std::string>& scenario_list(const ast::VarList& scenarios) const;
@@ -602,7 +620,7 @@ class ParserOutput : public ParserCallback
                          ast::FunctionOf, ast::IndistinguishableScenarios> statement;
     std::vector<statement> statement_list;
 
-    void add_relation(SparseVector, SparseVectorT<Symbol>, bool is_inquiry);
+    std::optional<ast::TargetRelation> target_ast;
 
     void add_scenario(const std::string&);
     void add_scenarios(const ast::VarList&);
@@ -623,13 +641,17 @@ public:
     std::vector<std::string> scenario_names;
     std::vector<std::vector<std::string>> var_names_by_scenario;
     std::vector<std::string> real_var_names;
+    std::vector<int> opt_coeff_var_names;
 
-    Matrix inquiries;
-    Matrix constraints;
     std::vector<ImplicitRules> implicits_by_scenario;
 
+    // First row: constant terms (independent of opt_coeff_vars) for the proof target. Subsequent
+    // rows get multiplied by the corresponding opt_coeff_vars.
+    Matrix target_mat;
+    MatrixT<Symbol> cmi_target_mat;
+
+    Matrix constraints;
     MatrixT<Symbol> cmi_constraints;
-    MatrixT<Symbol> cmi_inquiries;
 
     // Redundant constraints that can be used for proof simplification.
     MatrixT<Symbol> cmi_constraints_redundant;
@@ -637,6 +659,7 @@ public:
     void process();
 
     // parser callback
+    virtual void target(ast::TargetRelation) override;
     virtual void relation(ast::Relation) override;
     virtual void markov_chain(ast::MarkovChain) override;
     virtual void mutual_independence(ast::MutualIndependence) override;

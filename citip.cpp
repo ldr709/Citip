@@ -21,8 +21,6 @@
 using std::move;
 using util::sprint_all;
 
-static constexpr double eps = 3e-4;
-
 
 void CoinOsiProblem::setup(const OsiSolverInterface& solver)
 {
@@ -243,6 +241,9 @@ void ShannonTypeProblem::add_columns()
     }
 
     add_columns(column_map.size());
+
+    one_var = coin.add_col(0, 0); // Hack to make sure that the column index actually gets allocated.
+    coin.colub[one_var] = coin.infinity;
 }
 
 void ShannonTypeProblem::add_elemental_inequalities()
@@ -347,22 +348,27 @@ void ShannonTypeProblem::add_elemental_inequalities()
 void ParserOutput::add_term(SparseVector& v, SparseVectorT<Symbol>& cmi_v,
                             const ast::Term& t, int scenario_wildcard, double scale)
 {
-    double coef = scale * t.coefficient;
-    if (std::holds_alternative<ast::ConstantQuantity>(t.quantity)) {
-        v.inc(0, coef);
+    add_quantity(v, cmi_v, t.quantity, scenario_wildcard, scale * t.coefficient);
+}
+
+void ParserOutput::add_quantity(SparseVector& v, SparseVectorT<Symbol>& cmi_v,
+                                const ast::Quantity& quantity, int scenario_wildcard, double scale)
+{
+    if (std::holds_alternative<ast::ConstantQuantity>(quantity)) {
+        v.inc(0, scale);
         return;
     }
 
-    if (const auto* var = std::get_if<ast::VariableQuantity>(&t.quantity))
+    if (const auto* var = std::get_if<ast::VariableQuantity>(&quantity))
     {
         // A real valued variables, rather than an entropy.
         int var_i = get_real_var_index(var->name);
-        v.inc(-var_i - 1, coef);
-        cmi_v.inc(var_i, coef);
+        v.inc(-var_i - 1, scale);
+        cmi_v.inc(var_i, scale);
         return;
     }
 
-    const auto& q = std::get<ast::EntropyQuantity>(t.quantity);
+    const auto& q = std::get<ast::EntropyQuantity>(quantity);
     int num_parts = q.parts.lists.size();
 
     const int scenario = (q.parts.scenario == "" && scenario_wildcard >= 0)
@@ -399,7 +405,7 @@ void ParserOutput::add_term(SparseVector& v, SparseVectorT<Symbol>& cmi_v,
 
     if (num_parts == 1)
     {
-        add_cmi(v, cmi_v, CmiTriplet(implicits, set_indices[0], set_indices[0], c, scenario), coef);
+        add_cmi(v, cmi_v, CmiTriplet(implicits, set_indices[0], set_indices[0], c, scenario), scale);
     }
     else
     {
@@ -422,10 +428,11 @@ void ParserOutput::add_term(SparseVector& v, SparseVectorT<Symbol>& cmi_v,
                     s = -s;
                 }
             }
-            add_cmi(v, cmi_v, CmiTriplet(implicits, set_indices[num_parts-2], set_indices[num_parts-1], z, scenario), s*coef);
+            add_cmi(v, cmi_v, CmiTriplet(implicits, set_indices[num_parts-2], set_indices[num_parts-1], z, scenario), s*scale);
         }
     }
 }
+
 
 int ParserOutput::get_var_index(int scenario, const std::string& s)
 {
@@ -459,18 +466,14 @@ int ParserOutput::get_set_index(int scenario, const ast::VarList& l)
     return apply_implicits(implicits_by_scenario[scenario], idx);
 }
 
-void ParserOutput::add_relation(SparseVector v, SparseVectorT<Symbol> cmi_v, bool is_inquiry)
+void ParserOutput::target(ast::TargetRelation t)
 {
-    if (is_inquiry)
-    {
-        inquiries.push_back(move(v));
-        cmi_inquiries.push_back(move(cmi_v));
-    }
-    else
-    {
-        constraints.push_back(move(v));
-        cmi_constraints.push_back(move(cmi_v));
-    }
+    if (target_ast)
+        throw std::runtime_error("Can only prove one single target bound at a time.");
+    if (t.relation == ast::REL_EQ)
+        throw std::runtime_error("Cannot prove equality bounds, as they are two bounds at once.");
+
+    target_ast = t;
 }
 
 // Unfortunately the parser now needs two passes, so first save everything in a statement list.
@@ -497,16 +500,42 @@ void ParserOutput::indist(ast::IndistinguishableScenarios is)
 
 void ParserOutput::process()
 {
+    if (!target_ast)
+        throw std::runtime_error("Must provide a bound to prove.");
+
+    // Add the target coefficients to optimize
+    std::set<int> opt_coeff_vars_sorted;
+    for (const ast::TargetExpression& side : {target_ast->left, target_ast->right})
+        for (const auto& term : side)
+            if (term.coefficient.optimize_coeff_var)
+                opt_coeff_vars_sorted.insert(term.coefficient.optimize_coeff_var.value());
+
+    for (int opt_coeff_var : opt_coeff_vars_sorted)
+    {
+        opt_coeff_vars[opt_coeff_var] = opt_coeff_var_names.size();
+        opt_coeff_var_names.push_back(opt_coeff_var);
+    }
+
     // Add the scenarios
+
+    auto add_scenarios_from_quantity =
+        [&](const ast::Quantity& quantity)
+        {
+            if (const auto* q = std::get_if<ast::EntropyQuantity>(&quantity))
+                if (q->parts.scenario != "")
+                    add_scenario(q->parts.scenario);
+        };
 
     auto add_scenarios_from_expr =
         [&](const ast::Expression& e)
         {
             for (const auto& term : e)
-                if (const auto* q = std::get_if<ast::EntropyQuantity>(&term.quantity))
-                    if (q->parts.scenario != "")
-                        add_scenario(q->parts.scenario);
+                add_scenarios_from_quantity(term.quantity);
         };
+
+    for (const ast::TargetExpression& side : {target_ast->left, target_ast->right})
+        for (const auto& term : side)
+            add_scenarios_from_quantity(term.quantity);
 
     for (const auto& s : statement_list)
         std::visit(overload {
@@ -549,30 +578,38 @@ void ParserOutput::process()
 
     // Add the variables.
 
+    auto add_vars_from_quantity =
+        [&](const ast::Quantity& quantity)
+        {
+            std::visit(overload {
+                [&](const ast::EntropyQuantity& q)
+                {
+                    for (auto [scenario, last] = scenario_range(q.parts.scenario);
+                         scenario < last; ++scenario)
+                    {
+                        for (const auto& vl : q.parts.lists)
+                            add_vars(scenario, vl);
+                        add_vars(scenario, q.cond);
+                    }
+                },
+                [&](const ast::VariableQuantity& var)
+                {
+                    add_real_var(var.name);
+                },
+                [&](const ast::ConstantQuantity& mi) {}
+            }, quantity);
+        };
+
     auto add_vars_from_expr =
         [&](const ast::Expression& e)
         {
             for (const auto& term : e)
-            {
-                std::visit(overload {
-                    [&](const ast::EntropyQuantity& q)
-                    {
-                        for (auto [scenario, last] = scenario_range(q.parts.scenario);
-                             scenario < last; ++scenario)
-                        {
-                            for (const auto& vl : q.parts.lists)
-                                add_vars(scenario, vl);
-                            add_vars(scenario, q.cond);
-                        }
-                    },
-                    [&](const ast::VariableQuantity& var)
-                    {
-                        add_real_var(var.name);
-                    },
-                    [&](const ast::ConstantQuantity& mi) {}
-                }, term.quantity);
-            }
+                add_vars_from_quantity(term.quantity);
         };
+
+    for (const ast::TargetExpression& side : {target_ast->left, target_ast->right})
+        for (const auto& term : side)
+            add_vars_from_quantity(term.quantity);
 
     for (const auto& s : statement_list)
         std::visit(overload {
@@ -691,6 +728,24 @@ void ParserOutput::process()
         }
     }
 
+    // Retrieve the target bound.
+    {
+        target_mat.resize(opt_coeff_var_names.size() + 1);
+        cmi_target_mat.resize(opt_coeff_var_names.size() + 1);
+        int sign = target_ast->relation == ast::REL_LE ? -1 : 1;
+        for (const ast::TargetExpression& side : {target_ast->left, target_ast->right})
+        {
+            for (auto&& term : side)
+            {
+                int row = term.coefficient.optimize_coeff_var.has_value()
+                        ? opt_coeff_vars.at(*term.coefficient.optimize_coeff_var) + 1 : 0;
+                add_quantity(target_mat[row], cmi_target_mat[row], term.quantity, -1, sign * term.coefficient.scalar);
+            }
+
+            sign = -sign;
+        }
+    }
+
     for (const auto& s : statement_list)
         process_statement(s);
 }
@@ -783,8 +838,6 @@ void ParserOutput::process_statement(const statement& s)
 
 void ParserOutput::process_relation(const ast::Relation& re)
 {
-    bool is_inquiry = inquiries.empty();
-
     bool has_wildcard_scenario = false;
     for (const ast::Expression& side : {re.left, re.right})
     {
@@ -821,14 +874,13 @@ done:
             add_term(v, cmi_v, term, wildcard_scenario, l_sign);
         for (auto&& term : re.right)
             add_term(v, cmi_v, term, wildcard_scenario, r_sign);
-        add_relation(move(v), move(cmi_v), is_inquiry);
+        constraints.push_back(move(v));
+        cmi_constraints.push_back(move(cmi_v));
     }
 }
 
 void ParserOutput::process_mutual_independence(const ast::MutualIndependence& mi)
 {
-    bool is_inquiry = inquiries.empty();
-
     bool implicit = mi.implicit();
     bool approx = implicit ? false : !mi.bound_or_implicit.value().empty();
 
@@ -884,7 +936,8 @@ void ParserOutput::process_mutual_independence(const ast::MutualIndependence& mi
             if (approx)
                 for (auto&& term : mi.bound_or_implicit.value())
                     add_term(v, cmi_v, term, scenario, 1);
-            add_relation(move(v), move(cmi_v), is_inquiry);
+            constraints.push_back(move(v));
+            cmi_constraints.push_back(move(cmi_v));
         };
 
         // Skip the redundant constraints entirely and just do the full subset if there's way too many.
@@ -957,8 +1010,6 @@ void ParserOutput::process_mutual_independence(const ast::MutualIndependence& mi
 
 void ParserOutput::process_markov_chain(const ast::MarkovChain& mc)
 {
-    bool is_inquiry = inquiries.empty();
-
     for (const auto& sc: scenario_list(mc.scenarios))
     {
         int scenario = scenarios.at(sc);
@@ -979,7 +1030,8 @@ void ParserOutput::process_markov_chain(const ast::MarkovChain& mc)
             add_cmi(v, cmi_v, CmiTriplet(implicits, a,c,b, scenario), -1);
             for (auto&& term : mc.bound)
                 add_term(v, cmi_v, term, scenario, 1);
-            add_relation(move(v), move(cmi_v), is_inquiry);
+            constraints.push_back(move(v));
+            cmi_constraints.push_back(move(cmi_v));
         }
     }
 }
@@ -989,8 +1041,6 @@ void ParserOutput::process_function_of(const ast::FunctionOf& fo)
     // Already handled.
     if (fo.implicit())
         return;
-
-    bool is_inquiry = inquiries.empty();
 
     for (const auto& sc: scenario_list(fo.scenarios))
     {
@@ -1007,7 +1057,8 @@ void ParserOutput::process_function_of(const ast::FunctionOf& fo)
         add_cmi(v, cmi_v, CmiTriplet(implicits, func,func,of,scenario), -1);
         for (auto&& term : fo.bound_or_implicit.value())
             add_term(v, cmi_v, term, scenario, 1);
-        add_relation(move(v), move(cmi_v), is_inquiry);
+        constraints.push_back(move(v));
+        cmi_constraints.push_back(move(cmi_v));
     }
 }
 
@@ -1016,7 +1067,6 @@ void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
     if (is.indist_scenarios.empty())
         return;
 
-    bool is_inquiry = inquiries.empty();
     size_t view_size = is.indist_scenarios.front().view.size();
     if (!view_size)
         return;
@@ -1084,7 +1134,8 @@ void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
                     add_cmi(v, cmi_v, cmi1, 2*neg - 1);
                     if (approx)
                         add_approx_bound(v, cmi_v, a, false, 1.0);
-                    add_relation(move(v), move(cmi_v), is_inquiry);
+                    constraints.push_back(move(v));
+                    cmi_constraints.push_back(move(cmi_v));
                 }
             }
 
@@ -1149,7 +1200,8 @@ void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
                                 add_cmi(v, cmi_v, cmi0, 1 - 2*neg);
                                 add_cmi(v, cmi_v, cmi1, 2*neg - 1);
                                 add_approx_bound(v, cmi_v, set_for_size, a != b, 1.0);
-                                add_relation(move(v), move(cmi_v), is_inquiry);
+                                constraints.push_back(move(v));
+                                cmi_constraints.push_back(move(cmi_v));
 
                                 //std::cout << ExtendedShannonVar {cmi0, &var_names_by_scenario, &scenario_names, nullptr, &implicits_by_scenario[scenario0]} << ", ";
                                 //std::cout << ExtendedShannonVar {cmi1, &var_names_by_scenario, &scenario_names, nullptr, &implicits_by_scenario[scenario1]} << ", " << set_for_size << '\n';
@@ -1258,19 +1310,11 @@ std::ostream& operator<<(std::ostream& out, const LinearVariable& v)
     return out;
 }
 
-LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_rules, bool want_proof)
+LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_rules,
+                                        bool want_proof, bool check_bound)
 {
-    // check for equalities as I>=0 and -I>=0
-    if (I.is_equality) {
-        std::cout << "Warning: unimplemented equality proof generation.\n";
-        SparseVector v2(I);
-        v2.is_equality = false;
-        if (!check(v2))
-            return LinearProof();
-        for (auto&& ent : v2.entries)
-            ent.second = -ent.second;
-        return prove_impl(I, num_regular_rules, want_proof);
-    }
+    if (I.is_equality)
+        throw std::runtime_error("Checking for equalities is not supported.");
 
     coin.obj.resize(coin.num_cols);
     for (int i = 1; i <= coin.num_cols; ++i)
@@ -1298,36 +1342,16 @@ LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_r
         throw std::runtime_error("LinearProblem: Failed to solve LP.");
     }
 
-    //glp_smcp parm;
-    //glp_init_smcp(&parm);
-    //parm.msg_lev = GLP_MSG_ERR;
-    //parm.meth = GLP_DUAL;
-    //
-    //int outcome = glp_simplex(lp, &parm);
-    //if (outcome != 0) {
-    //    throw std::runtime_error(sprint_all(
-    //                "Error in glp_simplex: ", outcome));
-    //}
-    //
-    //int status = glp_get_status(lp);
-    //if (status == GLP_OPT) {
-    //} else if (status == GLP_UNBND) {
-    //    return LinearProof();
-    //} else {
-    //    // I am not sure about the exact distinction of GLP_NOFEAS, GLP_INFEAS,
-    //    // GLP_UNDEF, so here is a generic error message:
-    //    throw std::runtime_error(sprint_all(
-    //                "no feasible solution (status code ", status, ")"
-    //                ));
-    //}
-
     // the original check was for the solution (primal variable values)
     // rather than objective value, but let's do it simpler for now (if
     // an optimum is found, it should be zero anyway):
-    if (si->getObjValue() + I.get(0) + eps >= 0.0)
+    if (!check_bound || si->getObjValue() + I.get(0) + eps >= 0.0)
     {
         LinearProof proof;
         proof.initialized = true;
+
+        double const_term = si->getObjValue() + I.get(0);
+        proof.dual_solution.entries[0] = const_term;
 
         if (!want_proof)
             return proof;
@@ -1337,10 +1361,6 @@ LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_r
 
         proof.objective = I;
         proof.objective.is_equality = false;
-
-        double const_term = si->getObjValue() + I.get(0);
-        if (std::abs(const_term) > eps)
-            proof.dual_solution.entries[0] = const_term;
 
         const double* row_price = si->getRowPrice();
         std::vector<double> col_price(coin.num_cols, 0.0);
@@ -1368,14 +1388,17 @@ LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_r
         for (int i = num_regular_rules; i < coin.num_rows; ++i)
         {
             auto coin_constraint = coin.constraints.getVector(i);
+            bool no_lb = coin.rowlb.empty() || coin.rowlb[i] == -coin.infinity;
+            bool no_ub = coin.rowub.empty() || coin.rowub[i] == coin.infinity;
+
+            if (no_lb && no_ub) // Free row -- not actually a constraint.
+                continue;
+
             int row_type = 0;
-            if (coin.rowlb.empty() || coin.rowlb[i] == -coin.infinity)
+            if (no_lb)
                 row_type = -1;
-            if (coin.rowub.empty() || coin.rowub[i] == coin.infinity)
-            {
-                assert(row_type == 0);
+            if (no_ub)
                 row_type = 1;
-            }
 
             proof.custom_constraints.emplace_back();
             auto& constraint = proof.custom_constraints.back();
@@ -1409,12 +1432,14 @@ LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_r
 ShannonTypeProblem::ShannonTypeProblem(std::vector<std::vector<std::string>> var_names_by_scenario_,
                                        std::vector<std::string> scenario_names_,
                                        std::vector<std::string> real_var_names_,
+                                       std::vector<int> opt_coeff_var_names_,
                                        std::vector<ImplicitRules> implicits_by_scenario_,
                                        MatrixT<Symbol> cmi_constraints_redundant_) :
     LinearProblem(),
     var_names_by_scenario(move(var_names_by_scenario_)),
     scenario_names(move(scenario_names_)),
     real_var_names(move(real_var_names_)),
+    opt_coeff_var_names(move(opt_coeff_var_names_)),
     implicits_by_scenario(move(implicits_by_scenario_)),
     cmi_constraints_redundant(cmi_constraints_redundant_)
 {
@@ -1427,19 +1452,25 @@ ShannonTypeProblem::ShannonTypeProblem(std::vector<std::vector<std::string>> var
 
 ShannonTypeProblem::ShannonTypeProblem(const ParserOutput& out) :
     ShannonTypeProblem(out.var_names_by_scenario, out.scenario_names, out.real_var_names,
-                       out.implicits_by_scenario, out.cmi_constraints_redundant)
+                       out.opt_coeff_var_names, out.implicits_by_scenario,
+                       out.cmi_constraints_redundant)
 {
     for (int i = 0; i < out.constraints.size(); ++i)
         add(out.constraints[i], out.cmi_constraints[i]);
 }
 
-void ShannonTypeProblem::add(const SparseVector& v, SparseVectorT<Symbol> cmi_v)
+void ShannonTypeProblem::add(const SparseVector& v)
 {
     SparseVector realV;
     realV.is_equality = v.is_equality;
     for (const auto& [x, y] : v.entries)
-        realV.inc(x ? column_map.at(x) + 1 : 0, y);
+        realV.inc(x ? column_map.at(x) + 1 : one_var + 1, y);
     LinearProblem::add(realV);
+}
+
+void ShannonTypeProblem::add(const SparseVector& v, SparseVectorT<Symbol> cmi_v)
+{
+    add(v);
     cmi_constraints.push_back(move(cmi_v));
 }
 
@@ -1494,14 +1525,80 @@ bool ShannonRule::print(std::ostream& out, const ShannonVar* vars, double scale)
     return true;
 }
 
-ShannonTypeProof ShannonTypeProblem::prove(const SparseVector& I, SparseVectorT<Symbol> cmi_I)
+ShannonTypeProof ShannonTypeProblem::prove(Matrix I, MatrixT<Symbol> cmi_I)
 {
-    SparseVector realObj;
-    realObj.is_equality = I.is_equality;
-    for (const auto& [x, y] : I.entries)
-        realObj.inc(x ? column_map.at(x) + 1 : 0, y);
+    // Optimize the coefficients of the bound.
 
-    LinearProof lproof = LinearProblem::prove(realObj, row_to_cmi);
+    int num_c_vars = opt_coeff_var_names.size();
+    assert(I.size() == num_c_vars + 1);
+    assert(cmi_I.size() == num_c_vars + 1);
+
+    std::vector<double> opt_coeff_vals(num_c_vars);
+
+    SparseVector real_obj;
+    for (const auto& [x, y] : I[0].entries)
+        real_obj.inc(x ? column_map.at(x) + 1 : one_var + 1, y);
+
+    size_t c_var_rows_start = coin.num_rows;
+    for (int c_var = 0; c_var < num_c_vars; ++c_var)
+    {
+        I[c_var + 1].is_equality = true;
+        add(I[c_var + 1]);
+    }
+
+    for (int c_var = 0; c_var < num_c_vars; ++c_var)
+    {
+        // See how much the objective changes if expression c_var is multiplied by increases by 1.
+        coin.rowlb[c_var_rows_start + c_var] += 1.0;
+        coin.rowub[c_var_rows_start + c_var] += 1.0;
+
+        auto result = optimize(real_obj);
+        if (!result.has_value())
+            return ShannonTypeProof();
+
+        opt_coeff_vals[c_var] = -result.value();
+        std::cout << "Optimized: c" << opt_coeff_var_names[c_var] << " = " << opt_coeff_vals[c_var] << '\n';
+
+        // Set the coefficient and merge it into the main objective.
+        for (const auto& [x, y] : I[c_var + 1].entries)
+            real_obj.inc(x ? column_map.at(x) + 1 : one_var + 1, opt_coeff_vals[c_var] * y);
+        for (const auto& [x, y] : cmi_I[c_var + 1].entries)
+            cmi_I[0].inc(x, opt_coeff_vals[c_var] * y);
+        coin.rowlb[c_var_rows_start + c_var] = -coin.infinity;
+        coin.rowub[c_var_rows_start + c_var] =  coin.infinity;
+    }
+
+    // Now set one_var = 1 and check the actual proof.
+    coin.collb[one_var] = coin.colub[one_var] = 1;
+
+    LinearProof lproof = LinearProblem::prove(real_obj, row_to_cmi);
+
+    // Remove one_var from lproof, as it will just confuse everything downstream.
+    lproof.dual_solution.entries.erase(one_var + 1);
+    for (auto it = lproof.dual_solution.entries.cbegin(); it != lproof.dual_solution.entries.cend();)
+    {
+        if (it->first > one_var + 1)
+        {
+            lproof.dual_solution.entries[it->first - 1] = it->second;
+            auto old_it = it++;
+            lproof.dual_solution.entries.erase(old_it);
+        }
+        else
+            ++it;
+    }
+
+    for (auto& constraint : lproof.custom_constraints)
+    {
+        constraint.inc(0, constraint.get(one_var + 1));
+        constraint.entries.erase(one_var + 1);
+    }
+    lproof.objective.inc(0, lproof.objective.get(one_var + 1));
+    lproof.objective.entries.erase(one_var + 1);
+
+    lproof.primal_solution.pop_back();
+    lproof.variables.pop_back();
+    lproof.regular_constraints.pop_back();
+
     ShannonTypeProof proof(
         lproof,
         [&] (const LinearVariable& v)
@@ -1523,7 +1620,7 @@ ShannonTypeProof ShannonTypeProblem::prove(const SparseVector& I, SparseVectorT<
         });
     proof.cmi_constraints = cmi_constraints;
     proof.cmi_constraints_redundant = cmi_constraints_redundant;
-    proof.cmi_objective = move(cmi_I);
+    proof.cmi_objective = move(cmi_I[0]);
 
     return proof;
 }
@@ -2877,9 +2974,6 @@ ParserOutput parse(const std::vector<std::string>& exprs)
     }
 
     out.process();
-    if (out.inquiries.empty()) {
-        throw std::runtime_error("undefined information expression");
-    }
 
     return move(out);
 }

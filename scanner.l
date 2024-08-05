@@ -36,15 +36,13 @@
     #define YIELD_TOKEN(tok, val, type)     yylval->build<type>(val); \
                                             return yy::parser::token::T_##tok;
 
-    #define YY_TXT                  std::string(yytext, yyleng)
-    #define YY_TXT_SKIP1            std::string(yytext + 1, yyleng - 1)
-    #define YY_NUM                  std::atol(yytext)
-    #define YY_DBL                  std::atof(yytext)
+    #define YY_TXT(skip)            std::string(std::string(yytext + (skip), yyleng - (skip)))
+    #define YY_NUM(skip)            std::stoi(YY_TXT(skip))
+    #define YY_DBL(skip)            std::stod(YY_TXT(skip))
 
     #define INT_TOKEN(tok, val)     YIELD_TOKEN(tok, val, int)
-    #define NUM_TOKEN(tok)          YIELD_TOKEN(tok, YY_DBL, double)
-    #define STR_TOKEN(tok)          YIELD_TOKEN(tok, YY_TXT, std::string)
-    #define STR_TOKEN_SKIP1(tok)    YIELD_TOKEN(tok, YY_TXT_SKIP1, std::string)
+    #define NUM_TOKEN(tok, skip)    YIELD_TOKEN(tok, YY_DBL(skip), double)
+    #define STR_TOKEN(tok, skip)    YIELD_TOKEN(tok, YY_TXT(skip), std::string)
     #define LITERAL                 return yytext[0];
 
     #define YY_USER_ACTION          yylloc->columns(yyleng);
@@ -62,15 +60,19 @@
 approx                                 INT_TOKEN(APPROX, 0)
 indist                                 INT_TOKEN(INDIST, 0)
 implicit                               INT_TOKEN(IMPLICIT, 0)
+prove                                  INT_TOKEN(PROVE, 0)
 
  /* Distinguish between entropies and random variables by checking for a following '('. */
-I[[:alnum:]_{}\\]*/\(                      STR_TOKEN_SKIP1(MUTUAL_INFORMATION)
-H[[:alnum:]_{}\\]*/\(                      STR_TOKEN_SKIP1(ENTROPY)
+I[[:alnum:]_{}\\]*/\(                  STR_TOKEN(MUTUAL_INFORMATION, 1)
+H[[:alnum:]_{}\\]*/\(                  STR_TOKEN(ENTROPY, 1)
 
-[[:alnum:]_{}\\]*[[:alpha:]{}\\][[:alnum:]_{}\\]*  STR_TOKEN(NAME)
+ /* Coefficient to optimize in the target bound. */
+c[[:digit:]]+                          INT_TOKEN(OPT_COEFF, YY_NUM(1))
 
-[[:digit:]]+                           STR_TOKEN(INT) /* Delay parsing in case it's a scenario. */
-[[:digit:]]*\.[[:digit:]]+             NUM_TOKEN(NUM)
+[[:alnum:]_{}\\]*[[:alpha:]{}\\][[:alnum:]_{}\\]*  STR_TOKEN(NAME, 0)
+
+[[:digit:]]+                           STR_TOKEN(INT, 0) /* Delay parsing in case it's a scenario. */
+[[:digit:]]*\.[[:digit:]]+             NUM_TOKEN(NUM, 0)
 
 \<-                                    INT_TOKEN(FUNCTION_OF, 0)
 

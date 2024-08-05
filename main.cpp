@@ -59,23 +59,20 @@ try
 
     ParserOutput out = parse(expr);
     ShannonTypeProblem prob(out);
-    bool success = true;
-    for (int i = 0; i < out.inquiries.size(); ++i) {
-        ShannonTypeProof proof = prob.prove(out.inquiries[i], out.cmi_inquiries[i]);
-        if (proof)
-            std::cout << proof << '\n';
-        else
-        {
-            success = false;
-            break;
-        }
 
-        if (check)
-        {
-            std::cout << "Optimal: " << proof.dual_solution.get(0) << '\n';
-            continue;
-        }
+    ShannonTypeProof proof = prob.prove(std::move(out.target_mat), std::move(out.cmi_target_mat));
+    if (proof)
+        std::cout << proof << '\n';
+    else
+    {
+        cerr << "The information expression is either:\n"
+             << "    1. FALSE, or\n"
+             << "    2. a non-Shannon type inequality" << endl;
+        return 1;
+    }
 
+    if (!check)
+    {
         SimplifiedShannonProof simplified_proof = proof.simplify(depth);
         std::cout << simplified_proof << '\n';
 
@@ -83,15 +80,8 @@ try
         std::cout << ordered_proof << '\n';
     }
 
-    if (success) {
-        cerr << "The information expression is TRUE." << endl;
-        return 0;
-    }
-
-    cerr << "The information expression is either:\n"
-        << "    1. FALSE, or\n"
-        << "    2. a non-Shannon type inequality" << endl;
-    return 1;
+    cerr << "The information expression is TRUE." << endl;
+    return 0;
 }
 catch (std::exception& e)
 {

@@ -38,11 +38,13 @@
 %token <std::string>    INT
 %token <double>         NUM
 %token <int>            SIGN
-                        REL
+%token <int>            REL
 %token <int>            FUNCTION_OF
+%token <int>            OPT_COEFF
 %token <int>            APPROX
 %token <int>            INDIST
 %token <int>            IMPLICIT
+%token <int>            PROVE
 
 %type <ast::Relation>                       inequality
 %type <ast::MutualIndependence>             mutual_indep
@@ -54,6 +56,10 @@
 %type <ast::Expression>                     expr
 %type <ast::Term>                           term
 %type <ast::Quantity>                       quant
+%type <ast::TargetRelation>                 target
+%type <ast::TargetExpression>               target_expr
+%type <ast::TargetTerm>                     target_term
+%type <ast::TargetCoeff>                    target_coeff
 %type <ast::EntropyQuantity>                entropy
 %type <ast::EntropyQuantity>                mutual_inf
 %type <ast::VarList>                        name_list
@@ -82,6 +88,7 @@
 
     // results
     struct ParserCallback {
+        virtual void target(ast::TargetRelation) = 0;
         virtual void relation(ast::Relation) = 0;
         virtual void markov_chain(ast::MarkovChain) = 0;
         virtual void mutual_independence(ast::MutualIndependence) = 0;
@@ -116,6 +123,7 @@
     /* deliver output */
 
 statement    : %empty           { /* allow empty (or pure comment) lines */ }
+             | target           { cb->target(move($1)); }
              | inequality       { cb->relation(move($1)); }
              | mutual_indep     { cb->mutual_independence(move($1)); }
              | markov_chain     { cb->markov_chain(move($1)); }
@@ -124,6 +132,9 @@ statement    : %empty           { /* allow empty (or pure comment) lines */ }
              ;
 
     /* statements */
+
+target            : PROVE target_expr REL target_expr                            { $$ = {$2, $3, $4}; }
+                  ;
 
 inequality        : expr REL expr                                                { $$ = {$1, $2, $3}; }
                   ;
@@ -171,18 +182,33 @@ expr           : expr SIGN term                   { $$ = enlist($1, $3.flip_sign
                |           term                   { $$ = {$1}; }
                ;
 
+target_expr    : target_expr SIGN target_term     { $$ = enlist($1, $3.flip_sign($2)); }
+               |             SIGN target_term     { $$ = {$2.flip_sign($1)}; }
+               |                  target_term     { $$ = {$1}; }
+               ;
+
 term           : INT quant                        { $$ = {std::stod($1), $2}; }
                | NUM quant                        { $$ = {$1, $2}; }
                |     quant                        { $$ = { 1, $1}; }
-               | INT NAME                         { $$ = {std::stod($1), ast::VariableQuantity{$2}}; }
-               | NUM NAME                         { $$ = {$1, ast::VariableQuantity{$2}}; }
-               |     NAME                         { $$ = { 1, ast::VariableQuantity{$1}}; }
                | INT                              { $$ = {std::stod($1), ast::ConstantQuantity{}}; }
                | NUM                              { $$ = {$1, ast::ConstantQuantity{}}; }
                ;
 
+target_term    : target_coeff quant               { $$ = {$1, $2}; }
+               |              quant               { $$ = {{1, {}}, $1}; }
+               | target_coeff                     { $$ = {$1, ast::ConstantQuantity{}}; }
+               ;
+
+target_coeff   : INT OPT_COEFF                    { $$ = {std::stod($1), $2}; }
+               | NUM OPT_COEFF                    { $$ = {$1, $2}; }
+               |     OPT_COEFF                    { $$ = { 1, $1}; }
+               | INT                              { $$ = {std::stod($1), {}}; }
+               | NUM                              { $$ = {$1, {}}; }
+               ;
+
 quant          : entropy                          { $$ = $1; }
                | mutual_inf                       { $$ = $1; }
+               | NAME                             { $$ = ast::VariableQuantity{$1}; }
                ;
 
 entropy        : ENTROPY '(' name_list              ')'      { $$ = {{$1, {$3}}}; }

@@ -55,14 +55,39 @@ namespace ast
 
         inline Term& flip_sign(int s)
         {
-            if (s == SIGN_MINUS) {
+            if (s == SIGN_MINUS)
                 coefficient = -coefficient;
-            }
+            return *this;
+        }
+    };
+
+    struct TargetCoeff
+    {
+        double scalar;
+        std::optional<int> optimize_coeff_var;
+
+        inline TargetCoeff& flip_sign(int s)
+        {
+            if (s == SIGN_MINUS)
+                scalar = -scalar;
+            return *this;
+        }
+    };
+
+    struct TargetTerm
+    {
+        TargetCoeff coefficient;
+        Quantity quantity;
+
+        inline TargetTerm& flip_sign(int s)
+        {
+            coefficient.flip_sign(s);
             return *this;
         }
     };
 
     typedef std::vector<Term> Expression;
+    typedef std::vector<TargetTerm> TargetExpression;
 
     typedef std::optional<ast::Expression> BoundOrImplicit;
 
@@ -70,6 +95,12 @@ namespace ast
         Expression left;
         int relation;
         Expression right;
+    };
+
+    struct TargetRelation {
+        TargetExpression left;
+        int relation;
+        TargetExpression right;
     };
 
     struct MutualIndependence
