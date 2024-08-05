@@ -133,42 +133,42 @@ statement    : %empty           { /* allow empty (or pure comment) lines */ }
 
     /* statements */
 
-target            : PROVE target_expr REL target_expr                            { $$ = {$2, $3, $4}; }
+target            : PROVE target_expr REL target_expr                                { $$ = {$2, $3, $4}; }
                   ;
 
-inequality        : expr REL expr                                                { $$ = {$1, $2, $3}; }
+inequality        : expr REL expr                                                    { $$ = {$1, $2, $3}; }
                   ;
 
-markov_chain      : markov_chain_list maybe_bound                                { $$ = {{}, $1, $2}; }
-                  | name_list ':' markov_chain_list maybe_bound                  { $$ = {$1, $3, $4}; }
+markov_chain      : markov_chain_list maybe_bound                                    { $$ = {{}, $1, $2}; }
+                  | name_list ':' markov_chain_list maybe_bound                      { $$ = {$1, $3, $4}; }
                   ;
 
-markov_chain_list : markov_chain_list '/' name_list                              { $$ = enlist($1, $3); }
-                  | name_list '/' name_list '/' name_list                        { $$ = {$1, $3, $5}; }
+markov_chain_list : markov_chain_list '/' name_list                                  { $$ = enlist($1, $3); }
+                  | name_list '/' name_list '/' name_list                            { $$ = {$1, $3, $5}; }
                   ;
 
-mutual_indep      : mutual_indep_list bound_or_implicit                          { $$ = {{}, $1, $2}; }
-                  | name_list ':' mutual_indep_list bound_or_implicit            { $$ = {$1, $3, $4}; }
+mutual_indep      : mutual_indep_list bound_or_implicit                              { $$ = {{}, $1, $2}; }
+                  | name_list ':' mutual_indep_list bound_or_implicit                { $$ = {$1, $3, $4}; }
                   ;
 
-mutual_indep_list : mutual_indep_list '.' name_list                              { $$ = enlist($1, $3); }
-                  |         name_list '.' name_list                              { $$ = {$1, $3}; }
+mutual_indep_list : mutual_indep_list '.' name_list                                  { $$ = enlist($1, $3); }
+                  |         name_list '.' name_list                                  { $$ = {$1, $3}; }
                   ;
 
-determ_depen      : name_list FUNCTION_OF name_list bound_or_implicit            { $$ = {{}, $1, $3, $4}; }
-                  | name_list ':' name_list '<' '-' name_list bound_or_implicit  { $$ = {$1, $3, $6, $7}; }
+determ_depen      : name_list FUNCTION_OF name_list bound_or_implicit                { $$ = {{}, $1, $3, $4}; }
+                  | name_list ':' name_list FUNCTION_OF name_list bound_or_implicit  { $$ = {$1, $3, $5, $6}; }
                   ;
 
-indist            : INDIST indist_list indist_bound                              { $$ = {$2, $3}; }
-                  | INDIST name_list indist_bound                                { $$ = {{{{}, $2}}, $3}; }
-                  | INDIST ':' name_list indist_bound                            { $$ = {{{{}, $3}}, $4}; }
+indist            : INDIST indist_list indist_bound                                  { $$ = {$2, $3}; }
+                  | INDIST name_list indist_bound                                    { $$ = {{{{}, $2}}, $3}; }
+                  | INDIST ':' name_list indist_bound                                { $$ = {{{{}, $3}}, $4}; }
                   ;
 
-indist_list       : indist_list ';' indist_item                                  { $$ = enlist($1, $3); }
-                  | indist_item                                                  { $$ = {$1}; }
+indist_list       : indist_list ';' indist_item                                      { $$ = enlist($1, $3); }
+                  | indist_item                                                      { $$ = {$1}; }
                   ;
 
-indist_item       : name_list ':' name_list                                      { $$ = {$1, $3}; }
+indist_item       : name_list ':' name_list                                          { $$ = {$1, $3}; }
                   ;
 
     /* building blocks */
