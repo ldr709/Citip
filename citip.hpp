@@ -341,9 +341,10 @@ public:
 
     template<typename Rule>
     inline LinearProof<LinearVariable, NonNegativityOrOtherRule<Rule>>
-    prove(const SparseVector& I, const std::vector<Rule>& rules, bool check_bound = true)
+    prove(const SparseVector& I, const std::vector<Rule>& rules, bool check_bound = true,
+          std::vector<int>* warm_start = nullptr)
     {
-        auto orig_proof = prove_impl(I, rules.size(), true, check_bound);
+        auto orig_proof = prove_impl(I, rules.size(), true, check_bound, warm_start);
         typedef LinearProof<LinearVariable, NonNegativityOrOtherRule<Rule>> OutputProof;
         if (!orig_proof)
             return OutputProof();
@@ -364,15 +365,15 @@ public:
     }
 
     // check if I>=0 is redundant
-    inline bool check(const SparseVector& I)
+    inline bool check(const SparseVector& I, std::vector<int>* warm_start = nullptr)
     {
-        return prove_impl(I, 0, false);
+        return prove_impl(I, 0, false, true, warm_start);
     }
 
     // Find the smallest that I can be
-    inline std::optional<double> optimize(const SparseVector& I)
+    inline std::optional<double> optimize(const SparseVector& I, std::vector<int>* warm_start = nullptr)
     {
-        auto proof = prove_impl(I, 0, false, false);
+        auto proof = prove_impl(I, 0, false, false, warm_start);
         if (!proof)
             return {};
         return proof.dual_solution.get(0);
@@ -380,7 +381,8 @@ public:
 
 protected:
     LinearProof<> prove_impl(const SparseVector& I, int num_regular_rules,
-                             bool want_proof, bool check_bound = true);
+                             bool want_proof, bool check_bound = true,
+                             std::vector<int>* warm_start = nullptr);
 
     std::unique_ptr<OsiClpSolverInterface> si;
     CoinOsiProblem coin;

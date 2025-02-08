@@ -1303,7 +1303,8 @@ std::ostream& operator<<(std::ostream& out, const LinearVariable& v)
 }
 
 LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_rules,
-                                        bool want_proof, bool check_bound)
+                                        bool want_proof, bool check_bound,
+                                        std::vector<int>* warm_start)
 {
     if (I.is_equality)
         throw std::runtime_error("Checking for equalities is not supported.");
@@ -1314,6 +1315,12 @@ LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_r
 
     coin.load_problem_into_solver(*si);
     //si->writeLp("debug");
+
+	if (warm_start && warm_start->size() > 0)
+	{
+		assert(warm_start->size() == coin.num_cols + coin.num_rows);
+    	si->setBasisStatus(warm_start->data(), warm_start->data() + coin.num_cols);
+    }
 
     si->setLogLevel(3);
     si->getModelPtr()->setPerturbation(50);
@@ -1339,6 +1346,12 @@ LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_r
     // an optimum is found, it should be zero anyway):
     if (!check_bound || si->getObjValue() + I.get(0) + eps >= 0.0)
     {
+		if (warm_start)
+		{
+			warm_start->resize(coin.num_cols + coin.num_rows);
+    		si->getBasisStatus(warm_start->data(), warm_start->data() + coin.num_cols);
+    	}
+
         LinearProof proof;
         proof.initialized = true;
 
@@ -1545,13 +1558,15 @@ ShannonTypeProof ShannonTypeProblem::prove(Matrix I, MatrixT<Symbol> cmi_I)
         add(I[c_var + 1]);
     }
 
+    std::vector<int> warm_start;
+
     for (int c_var = 0; c_var < num_c_vars; ++c_var)
     {
         // See how much the objective changes if expression c_var is multiplied by decreases by 1.
         coin.rowlb[c_var_rows_start + c_var] -= 1.0;
         coin.rowub[c_var_rows_start + c_var] -= 1.0;
 
-        auto result = optimize(real_obj);
+        auto result = optimize(real_obj, &warm_start);
         if (!result.has_value())
             return ShannonTypeProof();
 
@@ -1591,7 +1606,7 @@ ShannonTypeProof ShannonTypeProblem::prove(Matrix I, MatrixT<Symbol> cmi_I)
 			coin.colub[col] += col_cost;
 	}
 
-    LinearProof lproof = LinearProblem::prove(real_obj, row_to_cmi, false);
+    LinearProof lproof = LinearProblem::prove(real_obj, row_to_cmi, false, &warm_start);
 
     // Remove the ficticious cost from the proof.
     std::cout << "Pseudorandom proof cost: " << -lproof.dual_solution.get(0) << '\n';
