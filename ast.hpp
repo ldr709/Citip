@@ -136,9 +136,19 @@ namespace ast
 
     typedef std::vector<IndistinguishableScenario> IndistinguishableScenariosList;
 
+    struct ApproxGroup;
+
     struct IndistinguishableScenarios {
         IndistinguishableScenariosList indist_scenarios;
-        std::vector<Expression> bound;
+        std::vector<ApproxGroup> bounds;
+    };
+
+    struct ApproxGroup
+    {
+        Expression bound;
+        unsigned int count;
+
+        void inc_group() { ++count; }
     };
 }
 

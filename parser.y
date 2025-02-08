@@ -52,7 +52,7 @@
 %type <ast::MarkovChain>                    markov_chain
 %type <std::vector<ast::VarList>>           markov_chain_list
 %type <ast::FunctionOf>                     determ_depen
-%type <std::vector<ast::Expression>>        expr_list
+/*%type <std::vector<ast::Expression>>        expr_list*/
 %type <ast::Expression>                     expr
 %type <ast::Term>                           term
 %type <ast::Quantity>                       quant
@@ -70,7 +70,8 @@
 %type <ast::IndistinguishableScenario>      indist_item;
 %type <ast::BoundOrImplicit>                bound_or_implicit;
 %type <ast::Expression>                     maybe_bound;
-%type <std::vector<ast::Expression>>        indist_bound;
+%type <std::vector<ast::ApproxGroup>>       indist_bound;
+%type <std::vector<ast::ApproxGroup>>       approx_list;
 
 %start statement
 
@@ -112,10 +113,10 @@
     #define yylex scanner->lex
 
     template <class T, class V>
-    T&& enlist(T& t, V& v)
+    T enlist(T&& t, V&& v)
     {
         t.push_back(move(v));
-        return move(t);
+        return t;
     }
 }
 %%
@@ -173,9 +174,11 @@ indist_item       : name_list ':' name_list                                     
 
     /* building blocks */
 
+/*
 expr_list      : expr_list ',' expr               { $$ = enlist($1, $3); }
                | expr                             { $$ = {$1}; }
                ;
+*/
 
 expr           : expr SIGN term                   { $$ = enlist($1, $3.flip_sign($2)); }
                |      SIGN term                   { $$ = {$2.flip_sign($1)}; }
@@ -239,8 +242,13 @@ maybe_bound    : APPROX expr                      { $$ = $2; }
                | %empty                           { $$ = {}; }
                ;
 
-indist_bound   : APPROX expr_list                 { $$ = $2; }
+indist_bound   : APPROX approx_list               { $$ = $2; }
                | %empty                           { $$ = {}; }
+               ;
+
+approx_list    : approx_list ',' expr             { $$ = enlist($1, ast::ApproxGroup{$3, 1}); }
+               | approx_list ','                  { $$ = $1; $$.back().inc_group(); }
+               | expr                             { $$ = {{$1, 1}}; }
                ;
 
 %%
