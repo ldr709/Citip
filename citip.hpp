@@ -341,9 +341,9 @@ public:
 
     template<typename Rule>
     inline LinearProof<LinearVariable, NonNegativityOrOtherRule<Rule>>
-    prove(const SparseVector& I, const std::vector<Rule>& rules)
+    prove(const SparseVector& I, const std::vector<Rule>& rules, bool check_bound = true)
     {
-        auto orig_proof = prove_impl(I, rules.size(), true);
+        auto orig_proof = prove_impl(I, rules.size(), true, check_bound);
         typedef LinearProof<LinearVariable, NonNegativityOrOtherRule<Rule>> OutputProof;
         if (!orig_proof)
             return OutputProof();

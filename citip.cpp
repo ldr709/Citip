@@ -1,5 +1,6 @@
 #include <math.h>       // NAN
 #include <utility>      // move
+#include <random>
 #include <sstream>      // istringstream
 #include <stdexcept>    // runtime_error
 #include <filesystem>
@@ -280,15 +281,6 @@ void ShannonTypeProblem::add_elemental_inequalities()
         double values[4];
         int i, a, b;
 
-        if (num_vars == 1) {
-            assert(column_map.size() == 1);
-            indices[0] = scenario;
-            values[0] = 1;
-            coin.add_row_lb(0.0, 1, indices, values);
-            row_to_cmi.emplace_back(CmiTriplet(implicits, 1,1,1, scenario));
-            continue;
-        }
-
         // index of the entropy component corresponding to the joint entropy of
         // all variables. NOTE: since the left-most column is not used, the
         // variables involved in a joint entropy correspond exactly to the bit
@@ -299,7 +291,7 @@ void ShannonTypeProblem::add_elemental_inequalities()
         // the form H(X_i|X_c)>=0 where c = ~ {i}:
         for (i = 0; i < num_vars; ++i) {
             int c = all ^ (1 << i);
-            if (all == apply_implicits(implicits, c))
+            if (all == apply_implicits(implicits, c) || c == 0)
                 continue;
 
             indices[0] = column_map.at(scenario_var(implicits, var_names_by_scenario, scenario, all));
@@ -1520,7 +1512,14 @@ bool ShannonRule::print(std::ostream& out, const ShannonVar* vars, double scale)
         return false;
 
     print_coeff(out, scale, true);
-    out << ExtendedShannonVar {*this, var_names_by_scenario, scenario_names, nullptr, implicits};
+    if ((*this)[0] >= 0)
+    	out << ExtendedShannonVar {*this, var_names_by_scenario, scenario_names, nullptr, implicits};
+    else
+    {
+    	assert((*this)[1] == (*this)[0]);
+    	assert((*this)[2] == 0);
+    	out << ExtendedShannonVar {*this, var_names_by_scenario, scenario_names, &vars[0].real_var_names, implicits, -(*this)[0] - 1};
+    }
     out << " >= 0";
     return true;
 }
@@ -1568,18 +1567,46 @@ ShannonTypeProof ShannonTypeProblem::prove(Matrix I, MatrixT<Symbol> cmi_I)
         coin.rowub[c_var_rows_start + c_var] =  coin.infinity;
     }
 
-    // Now set one_var = 1 and check the actual proof.
-    coin.collb[one_var] = coin.colub[one_var] = 1;
+	// Add a pseudorandom cost to using each rule, to try to avoid any degeneracy. Degeneracy can
+	// result in some arbitrary mix of different proofs, which will be more complicated than any one
+	// of the proofs.
+    std::lognormal_distribution rand_cost_dist(0.0, 1.0);
+    std::minstd_rand rand_source(5847171071UL);
 
-    LinearProof lproof = LinearProblem::prove(real_obj, row_to_cmi);
+	for (int row = 0; row < c_var_rows_start; ++row)
+	{
+		double row_cost = rand_cost_dist(rand_source);
+		if (row < coin.rowlb.size() && coin.rowlb[row] > -coin.infinity)
+			coin.rowlb[row] -= row_cost;
+		if (row < coin.rowub.size() && coin.rowub[row] < coin.infinity)
+			coin.rowub[row] += row_cost;
+	}
 
-    // Remove one_var from lproof, as it will just confuse everything downstream.
-    lproof.dual_solution.entries.erase(one_var + 1);
+	for (int col = 0; col < coin.num_cols; ++col)
+	{
+		double col_cost = rand_cost_dist(rand_source);
+		if (col < coin.collb.size() && coin.collb[col] > -coin.infinity)
+			coin.collb[col] -= col_cost;
+		if (col < coin.colub.size() && coin.colub[col] < coin.infinity)
+			coin.colub[col] += col_cost;
+	}
+
+    LinearProof lproof = LinearProblem::prove(real_obj, row_to_cmi, false);
+
+    // Remove the ficticious cost from the proof.
+    std::cout << "Pseudorandom proof cost: " << -lproof.dual_solution.get(0) << '\n';
+	lproof.dual_solution.entries.erase(0);
+
+    // Remove one_var from lproof and replace it with the actual value 1, as it will just confuse
+    // everything downstream.
     for (auto it = lproof.dual_solution.entries.cbegin(); it != lproof.dual_solution.entries.cend();)
     {
-        if (it->first > one_var + 1)
+        if (it->first >= one_var + 1)
         {
-            lproof.dual_solution.entries[it->first - 1] = it->second;
+        	if (it->first == one_var + 1)
+            	lproof.dual_solution.inc(0, it->second);
+        	else
+            	lproof.dual_solution.entries[it->first - 1] = it->second;
             auto old_it = it++;
             lproof.dual_solution.entries.erase(old_it);
         }
@@ -1589,15 +1616,15 @@ ShannonTypeProof ShannonTypeProblem::prove(Matrix I, MatrixT<Symbol> cmi_I)
 
     for (auto& constraint : lproof.custom_constraints)
     {
-        constraint.inc(0, constraint.get(one_var + 1));
+        constraint.entries[0] = constraint.get(one_var + 1);
         constraint.entries.erase(one_var + 1);
     }
-    lproof.objective.inc(0, lproof.objective.get(one_var + 1));
+    lproof.objective.entries[0] = lproof.objective.get(one_var + 1);
     lproof.objective.entries.erase(one_var + 1);
 
     lproof.primal_solution.pop_back();
     lproof.variables.pop_back();
-    lproof.regular_constraints.pop_back();
+    lproof.regular_constraints.erase(lproof.regular_constraints.begin() + one_var);
 
     ShannonTypeProof proof(
         lproof,
