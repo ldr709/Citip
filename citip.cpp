@@ -1184,7 +1184,7 @@ void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
                         for (int use_b_size = 0; use_b_size <= (a != b); ++use_b_size)
                         {
                             int set_for_size = use_b_size ? b : a;
-                            for (int neg = 0; neg <= approx; ++neg)
+                            for (int neg = 0; neg < 2; ++neg)
                             {
                                 SparseVector v;
                                 SparseVectorT<Symbol> cmi_v;
@@ -1316,10 +1316,10 @@ LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_r
     coin.load_problem_into_solver(*si);
     //si->writeLp("debug");
 
-	if (warm_start && warm_start->size() > 0)
-	{
-		assert(warm_start->size() == coin.num_cols + coin.num_rows);
-    	si->setBasisStatus(warm_start->data(), warm_start->data() + coin.num_cols);
+    if (warm_start && warm_start->size() > 0)
+    {
+        assert(warm_start->size() == coin.num_cols + coin.num_rows);
+        si->setBasisStatus(warm_start->data(), warm_start->data() + coin.num_cols);
     }
 
     si->setLogLevel(3);
@@ -1346,11 +1346,11 @@ LinearProof<> LinearProblem::prove_impl(const SparseVector& I, int num_regular_r
     // an optimum is found, it should be zero anyway):
     if (!check_bound || si->getObjValue() + I.get(0) + eps >= 0.0)
     {
-		if (warm_start)
-		{
-			warm_start->resize(coin.num_cols + coin.num_rows);
-    		si->getBasisStatus(warm_start->data(), warm_start->data() + coin.num_cols);
-    	}
+        if (warm_start)
+        {
+            warm_start->resize(coin.num_cols + coin.num_rows);
+            si->getBasisStatus(warm_start->data(), warm_start->data() + coin.num_cols);
+        }
 
         LinearProof proof;
         proof.initialized = true;
@@ -1526,12 +1526,12 @@ bool ShannonRule::print(std::ostream& out, const ShannonVar* vars, double scale)
 
     print_coeff(out, scale, true);
     if ((*this)[0] >= 0)
-    	out << ExtendedShannonVar {*this, var_names_by_scenario, scenario_names, nullptr, implicits};
+        out << ExtendedShannonVar {*this, var_names_by_scenario, scenario_names, nullptr, implicits};
     else
     {
-    	assert((*this)[1] == (*this)[0]);
-    	assert((*this)[2] == 0);
-    	out << ExtendedShannonVar {*this, var_names_by_scenario, scenario_names, &vars[0].real_var_names, implicits, -(*this)[0] - 1};
+        assert((*this)[1] == (*this)[0]);
+        assert((*this)[2] == 0);
+        out << ExtendedShannonVar {*this, var_names_by_scenario, scenario_names, &vars[0].real_var_names, implicits, -(*this)[0] - 1};
     }
     out << " >= 0";
     return true;
@@ -1582,35 +1582,35 @@ ShannonTypeProof ShannonTypeProblem::prove(Matrix I, MatrixT<Symbol> cmi_I)
         coin.rowub[c_var_rows_start + c_var] =  coin.infinity;
     }
 
-	// Add a pseudorandom cost to using each rule, to try to avoid any degeneracy. Degeneracy can
-	// result in some arbitrary mix of different proofs, which will be more complicated than any one
-	// of the proofs.
+    // Add a pseudorandom cost to using each rule, to try to avoid any degeneracy. Degeneracy can
+    // result in some arbitrary mix of different proofs, which will be more complicated than any one
+    // of the proofs.
     std::lognormal_distribution rand_cost_dist(0.0, 1.0);
     std::minstd_rand rand_source(5847171071UL);
 
-	for (int row = 0; row < c_var_rows_start; ++row)
-	{
-		double row_cost = rand_cost_dist(rand_source);
-		if (row < coin.rowlb.size() && coin.rowlb[row] > -coin.infinity)
-			coin.rowlb[row] -= row_cost;
-		if (row < coin.rowub.size() && coin.rowub[row] < coin.infinity)
-			coin.rowub[row] += row_cost;
-	}
+    for (int row = 0; row < c_var_rows_start; ++row)
+    {
+        double row_cost = rand_cost_dist(rand_source);
+        if (row < coin.rowlb.size() && coin.rowlb[row] > -coin.infinity)
+            coin.rowlb[row] -= row_cost;
+        if (row < coin.rowub.size() && coin.rowub[row] < coin.infinity)
+            coin.rowub[row] += row_cost;
+    }
 
-	for (int col = 0; col < coin.num_cols; ++col)
-	{
-		double col_cost = rand_cost_dist(rand_source);
-		if (col < coin.collb.size() && coin.collb[col] > -coin.infinity)
-			coin.collb[col] -= col_cost;
-		if (col < coin.colub.size() && coin.colub[col] < coin.infinity)
-			coin.colub[col] += col_cost;
-	}
+    for (int col = 0; col < coin.num_cols; ++col)
+    {
+        double col_cost = rand_cost_dist(rand_source);
+        if (col < coin.collb.size() && coin.collb[col] > -coin.infinity)
+            coin.collb[col] -= col_cost;
+        if (col < coin.colub.size() && coin.colub[col] < coin.infinity)
+            coin.colub[col] += col_cost;
+    }
 
     LinearProof lproof = LinearProblem::prove(real_obj, row_to_cmi, false, &warm_start);
 
     // Remove the ficticious cost from the proof.
     std::cout << "Pseudorandom proof cost: " << -lproof.dual_solution.get(0) << '\n';
-	lproof.dual_solution.entries.erase(0);
+    lproof.dual_solution.entries.erase(0);
 
     // Remove one_var from lproof and replace it with the actual value 1, as it will just confuse
     // everything downstream.
@@ -1618,10 +1618,10 @@ ShannonTypeProof ShannonTypeProblem::prove(Matrix I, MatrixT<Symbol> cmi_I)
     {
         if (it->first >= one_var + 1)
         {
-        	if (it->first == one_var + 1)
-            	lproof.dual_solution.inc(0, it->second);
-        	else
-            	lproof.dual_solution.entries[it->first - 1] = it->second;
+            if (it->first == one_var + 1)
+                lproof.dual_solution.inc(0, it->second);
+            else
+                lproof.dual_solution.entries[it->first - 1] = it->second;
             auto old_it = it++;
             lproof.dual_solution.entries.erase(old_it);
         }
