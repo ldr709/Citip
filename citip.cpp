@@ -1548,15 +1548,15 @@ ShannonTypeProof ShannonTypeProblem::prove(Matrix I, MatrixT<Symbol> cmi_I)
 
     for (int c_var = 0; c_var < num_c_vars; ++c_var)
     {
-        // See how much the objective changes if expression c_var is multiplied by increases by 1.
-        coin.rowlb[c_var_rows_start + c_var] += 1.0;
-        coin.rowub[c_var_rows_start + c_var] += 1.0;
+        // See how much the objective changes if expression c_var is multiplied by decreases by 1.
+        coin.rowlb[c_var_rows_start + c_var] -= 1.0;
+        coin.rowub[c_var_rows_start + c_var] -= 1.0;
 
         auto result = optimize(real_obj);
         if (!result.has_value())
             return ShannonTypeProof();
 
-        opt_coeff_vals[c_var] = -result.value();
+        opt_coeff_vals[c_var] = result.value();
         std::cout << "Optimized: c" << opt_coeff_var_names[c_var] << " = " << opt_coeff_vals[c_var] << '\n';
 
         // Set the coefficient and merge it into the main objective.
