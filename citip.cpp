@@ -1094,21 +1094,18 @@ void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
         }
     };
 
-    auto check_if_grouped_set = [&](int a)
+    auto how_many_groups_overlap = [&](int a)
     {
         unsigned int start = 0;
-        bool overlap_found;
+        int overlaps = 0;
         for (int i = 1; i < bounds.size(); ++i)
         {
             unsigned int end = start + bounds[i].count;
             if (a & ((1U << end) - (1U << start)))
-                if (overlap_found)
-                    return false;
-                else
-                    overlap_found = true;
+                overlaps++;
             start = end;
         }
-        return true;
+        return overlaps;
     };
 
     // Require that all entropies defined by the view match between the scenarios.
@@ -1183,11 +1180,14 @@ void ParserOutput::process_indist(const ast::IndistinguishableScenarios& is)
 
                     if (view_size > 7)
                     {
-                        // Only include rules that are grouped by the approximation bound groups,
-                        // for efficiency.
-                        if (!check_if_grouped_set(z))
+                        // The CMI rules are essentially redundant (up to factor of 2) with the
+                        // conditional entropy rules, so just skip them for efficiency.
+                        if (a != b)
                             continue;
-                        if (a != b && !check_if_grouped_set(a) && !check_if_grouped_set(b))
+
+                        // If a and z touch the same groups, there should be another way to cover
+                        // this bound.
+                        if (how_many_groups_overlap(a | z) < how_many_groups_overlap(a) + how_many_groups_overlap(z))
                             continue;
                     }
 
