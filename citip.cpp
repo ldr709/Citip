@@ -1596,7 +1596,7 @@ ShannonTypeProof ShannonTypeProblem::prove(Matrix I, MatrixT<Symbol> cmi_I)
         add(I[c_var + 1]);
     }
 
-    std::vector<int> warm_start;
+    //std::vector<int> warm_start;
 
     for (int c_var = 0; c_var < num_c_vars; ++c_var)
     {
@@ -1604,7 +1604,7 @@ ShannonTypeProof ShannonTypeProblem::prove(Matrix I, MatrixT<Symbol> cmi_I)
         coin.rowlb[c_var_rows_start + c_var] -= 1.0;
         coin.rowub[c_var_rows_start + c_var] -= 1.0;
 
-        auto result = optimize(real_obj, &warm_start);
+        auto result = optimize(real_obj /*, &warm_start*/);
         if (!result.has_value())
             return ShannonTypeProof();
 
@@ -1644,7 +1644,7 @@ ShannonTypeProof ShannonTypeProblem::prove(Matrix I, MatrixT<Symbol> cmi_I)
             coin.colub[col] += col_cost;
     }
 
-    LinearProof lproof = LinearProblem::prove(real_obj, row_to_cmi, false, &warm_start);
+    LinearProof lproof = LinearProblem::prove(real_obj, row_to_cmi, false /*, &warm_start*/);
 
     // Remove the ficticious cost from the proof.
     std::cout << "Pseudorandom proof cost: " << -lproof.dual_solution.get(0) << '\n';
